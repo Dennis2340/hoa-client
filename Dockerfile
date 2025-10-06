@@ -1,0 +1,65 @@
+# Use Debian-based image for maximum Puppeteer/Chromium compatibility
+FROM node:18-bullseye-slim
+
+# Set working directory
+WORKDIR /usr/src/app
+
+# Install Chromium and required system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      chromium \
+      ca-certificates \
+      fonts-liberation \
+      libnss3 \
+      libx11-6 \
+      libx11-xcb1 \
+      libxcomposite1 \
+      libxdamage1 \
+      libxrandr2 \
+      libgbm1 \
+      libasound2 \
+      libatk-bridge2.0-0 \
+      libgtk-3-0 \
+      xdg-utils \
+      curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user for security
+RUN groupadd -g 1001 aidex && useradd -m -u 1001 -g aidex -s /usr/sbin/nologin aidex
+
+# Copy package files and install dependencies
+COPY package*.json ./
+RUN npm ci --only=production && npm cache clean --force
+
+# Copy application code
+COPY . .
+
+# Explicitly copy the public folder to ensure it's in the image
+COPY public/ ./public/
+
+# Verify public folder exists
+RUN [ -d ./public ] && echo "✅ Public folder included" || echo "❌ Public folder missing"
+
+# Ensure session/auth directories exist and owned by non-root user
+RUN mkdir -p .wwebjs_auth .wwebjs_cache && \
+    chown -R aidex:aidex /usr/src/app
+
+# Switch to non-root user
+USER root
+
+# Expose container port
+EXPOSE 3700
+
+# Healthcheck for readiness
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:3700/healthz || exit 1
+
+# Set Chromium and Puppeteer environment variables
+ENV CHROME_BIN=/usr/bin/chromium \
+    CHROME_PATH=/usr/bin/chromium \
+    PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
+    NODE_OPTIONS="--max-old-space-size=1024"
+
+# Start the application
+CMD ["node", "index.js"]
