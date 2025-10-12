@@ -62,4 +62,4 @@ ENV CHROME_BIN=/usr/bin/chromium \
     NODE_OPTIONS="--max-old-space-size=1024"
 
 # Start the application
-CMD ["node", "index.js"]
+CMD ["node", "--expose-gc", "index.js"]
