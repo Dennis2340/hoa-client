@@ -9,7 +9,6 @@ const cors = require('cors');
 const http = require('http');
 const path = require('path');
 const FallbackSessionStore = require('./fallback-session');
-const QueueService = require('./services/QueueService');
 require('dotenv').config();
 const axios = require('axios');
 
@@ -33,21 +32,8 @@ process.on('SIGTERM', async () => {
 async function gracefulShutdown() {
   console.log('Starting graceful shutdown...');
   
-  stopQueueProcessor();
-  
   for (const [chatbotId] of sessionHealthChecks) {
     stopHealthMonitoring(chatbotId);
-  }
-  
-  try {
-    for (const [clientPhoneE164, queueService] of queueServices) {
-      if (messageQueue.length > 0) {
-        await queueService.loadQueueFromMemory(messageQueue);
-        console.log(`Persisted ${messageQueue.length} messages to MongoDB for ${clientPhoneE164}`);
-      }
-    }
-  } catch (error) {
-    console.error('Error persisting queue to MongoDB:', error.message);
   }
   
   if (mongoose.connection.readyState) {
@@ -55,7 +41,7 @@ async function gracefulShutdown() {
     console.log('MongoDB connection closed');
   }
   
-  console.log('Sessions and queue data preserved in MongoDB for restart');
+  console.log('Shutdown complete');
 }
 
 const app = express();
@@ -97,20 +83,11 @@ const requireApiKey = (req, res, next) => {
 
 const qrCodes = new Map();
 const clients = new Map();
-const queueServices = new Map();
 const messagesLog = [];
 const MAX_LOG = 200;
 
 const processedMessages = new Set();
 const MESSAGE_DEDUP_TTL = 300000;
-
-const messageQueue = [];
-const MAX_QUEUE_SIZE = 1000;
-const QUEUE_PROCESS_INTERVAL = 2000;
-const MAX_RETRY_ATTEMPTS = 5;
-const RETRY_BACKOFF_BASE = 1000;
-let queueProcessor = null;
-let isProcessingQueue = false;
 
 // Session monitoring
 const sessionHealthChecks = new Map();
@@ -134,78 +111,6 @@ async function sendMessageDirectly(client, phoneE164, message) {
     return { success: true, jid: wid._serialized };
   } catch (error) {
     return { success: false, error: error.message };
-  }
-}
-
-function startQueueProcessor() {
-  if (queueProcessor) {
-    clearInterval(queueProcessor);
-  }
-  
-  console.log(`🔄 ${process.env.BRAND_NAME || 'Server'}: Starting message queue processor`);
-  
-  queueProcessor = setInterval(async () => {
-    if (isProcessingQueue) {
-      return;
-    }
-    
-    isProcessingQueue = true;
-    
-    try {
-      const clientPhoneE164 = process.env.CLIENT_PHONE_E164;
-      const client = clients.get(clientPhoneE164);
-      const queueService = queueServices.get(clientPhoneE164);
-      
-      if (!client || !queueService) {
-        return;
-      }
-      
-      const state = await client.getState().catch(() => null);
-      const isClientReady = state && !['UNPAIRED', 'UNPAIRED_IDLE', 'CONFLICT', 'UNLAUNCHED'].includes(state);
-      
-      if (!isClientReady) {
-        return;
-      }
-      
-      const messagesToProcess = await queueService.getNextMessages(10);
-      
-      if (messagesToProcess.length === 0) {
-        return;
-      }
-      
-      console.log(`📤 Queue processor: Processing ${messagesToProcess.length} messages`);
-      
-      for (const queuedMessage of messagesToProcess) {
-        try {
-          const result = await sendMessageDirectly(client, queuedMessage.phoneE164, queuedMessage.message);
-          
-          if (result.success) {
-            await queueService.markAsSent(queuedMessage.messageId);
-            console.log(`✅ Queue processor: Message sent to ${queuedMessage.phoneE164}`);
-          } else {
-            await queueService.markAsFailed(queuedMessage.messageId, result.error);
-            console.warn(`⏳ Queue processor: Message failed for ${queuedMessage.phoneE164}: ${result.error}`);
-          }
-        } catch (error) {
-          await queueService.markAsFailed(queuedMessage.messageId, error.message);
-          console.error(`❌ Queue processor: Error processing message for ${queuedMessage.phoneE164}:`, error.message);
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
-    } catch (error) {
-      console.error('Queue processor error:', error.message);
-    } finally {
-      isProcessingQueue = false;
-    }
-  }, QUEUE_PROCESS_INTERVAL);
-}
-
-function stopQueueProcessor() {
-  if (queueProcessor) {
-    clearInterval(queueProcessor);
-    queueProcessor = null;
-    console.log(`⏹️ ${process.env.BRAND_NAME || 'Server'}: Stopped message queue processor`);
   }
 }
 
@@ -388,24 +293,10 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     console.log(`💾 ${process.env.BRAND_NAME || 'Server'}: Using LocalAuth for session persistence`);
   }
 
-  // Configure web version handling based on environment
+  // Client configuration
   const clientConfig = {
     authStrategy: authStrategy,
   };
-  // Only pin the web version if provided via env. Otherwise, allow auto-detection.
-  if (process.env.WEB_VERSION) {
-    clientConfig.webVersion = process.env.WEB_VERSION;
-  }
-
-  // Add web version cache only if not disabled
-  if (process.env.DISABLE_WEB_VERSION_CACHE !== 'true') {
-    clientConfig.webVersionCache = {
-      type: 'remote',
-      // Updated remote path for WhatsApp Web versions
-      remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html',
-      strict: false,
-    };
-  }
 
   // Add Puppeteer configuration
   clientConfig.puppeteer = {
@@ -509,23 +400,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Client ready for ${chatbotId}`);
     const phoneNumber = client.info?.wid?.user || 'unknown';
     
-    if (!queueServices.has(chatbotId)) {
-      const queueService = new QueueService(chatbotId);
-      queueServices.set(chatbotId, queueService);
-      
-      try {
-        const restoredMessages = await queueService.restoreQueueToMemory();
-        messageQueue.push(...restoredMessages);
-        if (restoredMessages.length > 0) {
-          console.log(`Restored ${restoredMessages.length} messages from MongoDB to memory queue`);
-        }
-      } catch (error) {
-        console.error('Error restoring queue from MongoDB:', error.message);
-      }
-    }
-    
     startHealthMonitoring(chatbotId, client);
-    startQueueProcessor();
     
     try {
       await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}/api/whatsapp/webhooks`, {
@@ -753,7 +628,6 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     
     // Stop health monitoring and queue processor
     stopHealthMonitoring(chatbotId);
-    stopQueueProcessor();
     
     try {
       await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}/api/whatsapp/webhooks`, {
@@ -873,14 +747,6 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
       }
     } else if (error.message.includes('timeout')) {
       console.warn(`⏱️ ${process.env.BRAND_NAME || 'Server'}: Initialization timeout, extending wait time for retry`);
-    } else if (error.message.includes('VERSION') || error.message.includes('Evaluation failed')) {
-      console.warn(`🌐 ${process.env.BRAND_NAME || 'Server'}: WhatsApp Web version detection failed, this is usually due to WhatsApp Web updates`);
-      console.warn(`🔧 ${process.env.BRAND_NAME || 'Server'}: Consider updating WEB_VERSION environment variable or checking wa-version repository`);
-      // For VERSION errors, clear any cached web version data
-      if (retryCount === maxRetries - 1) {
-        console.log(`🧹 ${process.env.BRAND_NAME || 'Server'}: Clearing session due to persistent VERSION errors`);
-        await clearSession(chatbotId);
-      }
     }
     
     if (retryCount < maxRetries - 1) {
@@ -1136,7 +1002,7 @@ app.post('/send-message', requireApiKey, async (req, res) => {
 // Send WhatsApp message using E.164 phone number
 app.post('/send-whatsapp', requireApiKey, async (req, res) => {
   console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: Received /send-whatsapp request:`, req.body);
-  const { phoneE164, message, priority = 'normal' } = req.body || {};
+  const { phoneE164, message } = req.body || {};
   
   if (!phoneE164 || !/^\+\d{6,15}$/.test(phoneE164)) {
     return res.status(400).json({ error: 'Invalid phoneE164. Expected E.164 format e.g. +15551234567' });
@@ -1153,47 +1019,19 @@ app.post('/send-whatsapp', requireApiKey, async (req, res) => {
 
   try {
     // Check if client is ready
-    let state = await client.getState().catch(() => null);
+    const state = await client.getState().catch(() => null);
     const isClientReady = state && !['UNPAIRED', 'UNPAIRED_IDLE', 'CONFLICT', 'UNLAUNCHED'].includes(state);
     
-    if (isClientReady) {
-      // Client is ready, try to send immediately
-      try {
-        const result = await sendMessageDirectly(client, phoneE164, message);
-        if (result.success) {
-          console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Message sent immediately to ${phoneE164}: ${message}`);
-          return res.status(200).json({ status: 'sent', to: phoneE164, queued: false });
-        }
-      } catch (error) {
-        console.warn(`Failed to send immediately, queuing message:`, error.message);
-      }
+    if (!isClientReady) {
+      return res.status(503).json({ error: 'Client not ready' });
     }
-    
-    const clientPhoneE164 = process.env.CLIENT_PHONE_E164;
-    let queueService = queueServices.get(clientPhoneE164);
-    
-    if (!queueService) {
-      queueService = new QueueService(clientPhoneE164);
-      queueServices.set(clientPhoneE164, queueService);
+    const result = await sendMessageDirectly(client, phoneE164, message);
+    if (result.success) {
+      console.log(`${process.env.BRAND_NAME || 'Server'}: Message sent immediately to ${phoneE164}: ${message}`);
+      return res.status(200).json({ status: 'sent', to: phoneE164 });
     }
-    
-    const queuedMessage = await queueService.addMessage(phoneE164, message, priority);
-    
-    console.log(`📬 ${process.env.BRAND_NAME || 'Server'}: Message queued for ${phoneE164}`);
-    
-    if (!queueProcessor) {
-      startQueueProcessor();
-    }
-    
-    const stats = await queueService.getQueueStats();
-    
-    return res.status(202).json({ 
-      status: 'queued', 
-      to: phoneE164, 
-      messageId: queuedMessage.messageId,
-      queuePosition: stats.pending,
-      queued: true
-    });
+    console.warn(`${process.env.BRAND_NAME || 'Server'}: Failed to send message to ${phoneE164}: ${result.error}`);
+    return res.status(500).json({ error: 'Failed to send', details: result.error });
   } catch (error) {
     console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error processing WhatsApp message:`, error.message, error.stack);
     return res.status(500).json({ error: 'Failed to process WhatsApp message', details: error.message });
