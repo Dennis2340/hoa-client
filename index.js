@@ -1,14 +1,11 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const { Client, RemoteAuth, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const { MongoStore } = require('wwebjs-mongo');
-const mongoose = require('mongoose');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const { Server } = require('socket.io');
 const cors = require('cors');
 const http = require('http');
 const path = require('path');
-const FallbackSessionStore = require('./fallback-session');
 require('dotenv').config();
 const axios = require('axios');
 
@@ -34,11 +31,6 @@ async function gracefulShutdown() {
   
   for (const [chatbotId] of sessionHealthChecks) {
     stopHealthMonitoring(chatbotId);
-  }
-  
-  if (mongoose.connection.readyState) {
-    await mongoose.connection.close();
-    console.log('MongoDB connection closed');
   }
   
   console.log('Shutdown complete');
@@ -186,27 +178,16 @@ function stopHealthMonitoring(chatbotId) {
 
 async function clearSession(chatbotId) {
   try {
-    if (!mongoose.connection.readyState) {
-      const mongoOptions = {
-        serverSelectionTimeoutMS: 10000,
-        socketTimeoutMS: 45000
-      };
-      
-      if (process.env.MONGODB_URI.includes('mongodb+srv://')) {
-        mongoOptions.tls = true;
-      } else if (process.env.MONGODB_URI.includes('localhost') || process.env.MONGODB_URI.includes('127.0.0.1')) {
-        mongoOptions.tls = false;
-      }
-      
-      await mongoose.connect(process.env.MONGODB_URI, mongoOptions);
-    }
+    const fs = require('fs');
+    const path = require('path');
+    const sessionPath = path.join(__dirname, '.wwebjs_auth', `session-${String(chatbotId).replace(/[^A-Za-z0-9_-]/g, '_')}`);
     
-    const store = new MongoStore({ mongoose: mongoose });
-    const sanitizedClientId = String(chatbotId).replace(/[^A-Za-z0-9_-]/g, '_');
-    await store.delete(sanitizedClientId);
-    console.log(`Cleared session from MongoDB for ${chatbotId}`);
+    if (fs.existsSync(sessionPath)) {
+      fs.rmSync(sessionPath, { recursive: true, force: true });
+      console.log(`Cleared local session for ${chatbotId}`);
+    }
   } catch (error) {
-    console.error(`Error clearing session from MongoDB for ${chatbotId}:`, error.message);
+    console.error(`Error clearing local session for ${chatbotId}:`, error.message);
   }
 }
 
@@ -246,123 +227,17 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     throw new Error('Network check failed: Cannot reach web.whatsapp.com');
   }
 
-  // Try MongoDB first, fallback to LocalAuth if MongoDB fails
-  let authStrategy;
-  let sessionStorageType = 'local';
+  // Simple client configuration with LocalAuth
+  const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: { 
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
+  });
   
-  try {
-    if (process.env.MONGODB_URI && !mongoose.connection.readyState) {
-      const mongoOptions = {
-        serverSelectionTimeoutMS: 10000,
-        socketTimeoutMS: 45000,
-        maxPoolSize: 10,
-        retryWrites: true,
-        w: 'majority'
-      };
-      
-      if (process.env.MONGODB_URI.includes('mongodb+srv://')) {
-        mongoOptions.tls = true;
-      } else if (process.env.MONGODB_URI.includes('localhost') || process.env.MONGODB_URI.includes('127.0.0.1')) {
-        mongoOptions.tls = false;
-      }
-      
-      await mongoose.connect(process.env.MONGODB_URI, mongoOptions);
-      console.log('✅ Connected to MongoDB for session storage');
-    }
-    
-    if (mongoose.connection.readyState === 1) {
-      const store = new MongoStore({ mongoose: mongoose });
-      const sanitizedClientId = String(chatbotId).replace(/[^A-Za-z0-9_-]/g, '_');
-      authStrategy = new RemoteAuth({
-        clientId: sanitizedClientId,
-        store: store,
-        backupSyncIntervalMs: 300000,
-      });
-      sessionStorageType = 'mongodb';
-      console.log(`🔄 ${process.env.BRAND_NAME || 'Server'}: Using MongoDB RemoteAuth for session persistence`);
-    } else {
-      throw new Error('MongoDB connection not ready');
-    }
-  } catch (mongoError) {
-    console.warn(`⚠️ ${process.env.BRAND_NAME || 'Server'}: MongoDB session storage failed, using LocalAuth fallback:`, mongoError.message);
-    authStrategy = new LocalAuth({
-      clientId: String(chatbotId).replace(/[^A-Za-z0-9_-]/g, '_'),
-      dataPath: './.wwebjs_auth'
-    });
-    sessionStorageType = 'local';
-    console.log(`💾 ${process.env.BRAND_NAME || 'Server'}: Using LocalAuth for session persistence`);
-  }
-
-  // Client configuration
-  const clientConfig = {
-    authStrategy: authStrategy,
-  };
-
-  // Add Puppeteer configuration
-  clientConfig.puppeteer = {
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu',
-      '--disable-extensions',
-      '--disable-web-security',
-      '--disable-features=VizDisplayCompositor',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding',
-      '--disable-default-apps',
-      '--disable-popup-blocking',
-      '--disable-translate',
-      '--disable-sync',
-      '--no-first-run',
-      '--disable-client-side-phishing-detection',
-      '--disable-blink-features=AutomationControlled',
-      // Docker/Container specific fixes
-      '--no-zygote',
-      '--disable-crashpad',
-      '--disable-crash-reporter',
-      '--disable-logging',
-      '--silent',
-      '--disable-gpu-compositing',
-      '--disable-gpu-rasterization',
-      '--disable-3d-apis',
-      '--disable-accelerated-video-decode',
-      '--disable-accelerated-video-encode',
-      '--disable-plugins',
-      '--memory-pressure-off',
-      '--max_old_space_size=512',
-      // Stability improvements
-      '--disable-background-networking',
-      '--disable-breakpad',
-      '--disable-component-extensions-with-background-pages',
-      '--disable-features=TranslateUI',
-      '--disable-ipc-flooding-protection',
-      '--enable-features=NetworkService,NetworkServiceLogging',
-      '--force-color-profile=srgb',
-      '--metrics-recording-only',
-      '--safebrowsing-disable-auto-update',
-      '--use-mock-keychain',
-    ],
-    headless: true,
-    timeout: 240000,
-    dumpio: false,
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_EXECUTABLE_PATH || '/usr/bin/chromium',
-    handleSIGINT: false,
-    handleSIGTERM: false,
-    handleSIGHUP: false,
-    ignoreDefaultArgs: ['--disable-extensions'],
-    defaultViewport: { width: 1024, height: 768 },
-    devtools: false,
-  };
-
-  // Add session persistence configuration
-  clientConfig.takeoverOnConflict = true;
-  clientConfig.takeoverTimeoutMs = 60000;
-
-  // Create the client with the configured options
-  const client = new Client(clientConfig);
+  const sessionStorageType = 'local';
+  console.log(`💾 ${process.env.BRAND_NAME || 'Server'}: Using simple LocalAuth configuration`);
 
   client.on('loading_screen', (percent, message) => {
     console.log(`Loading screen for ${chatbotId}: ${percent}% - ${message}`);
@@ -626,7 +501,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
   client.on('disconnected', async (reason) => {
     console.log(`❌ ${process.env.BRAND_NAME || 'Server'}: Client disconnected for ${chatbotId}:`, reason);
     
-    // Stop health monitoring and queue processor
+    // Stop health monitoring
     stopHealthMonitoring(chatbotId);
     
     try {
@@ -894,80 +769,6 @@ app.get('/logs/messages', requireApiKey, (req, res) => {
   }
 });
 
-app.get('/queue/status', requireApiKey, async (req, res) => {
-  try {
-    const clientPhoneE164 = process.env.CLIENT_PHONE_E164;
-    const queueService = queueServices.get(clientPhoneE164);
-    
-    if (!queueService) {
-      return res.status(404).json({ error: 'Queue service not initialized' });
-    }
-    
-    const stats = await queueService.getQueueStats();
-    const messages = await queueService.getQueueMessages(50);
-    const now = Date.now();
-    
-    const queueStats = {
-      size: stats.total,
-      processing: isProcessingQueue,
-      processorActive: !!queueProcessor,
-      messages: messages.map(msg => ({
-        id: msg.messageId,
-        phoneE164: msg.phoneE164,
-        message: msg.message.substring(0, 100) + (msg.message.length > 100 ? '...' : ''),
-        priority: msg.priority,
-        attempts: msg.attempts,
-        maxAttempts: msg.maxAttempts,
-        nextRetry: msg.nextRetry.getTime(),
-        waitingMs: Math.max(0, msg.nextRetry.getTime() - now),
-        age: now - msg.timestamp.getTime()
-      })),
-      stats: {
-        pending: stats.pending,
-        waiting: stats.waiting,
-        highPriority: stats.highPriority,
-        failed: stats.failed
-      }
-    };
-    res.json(queueStats);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to get queue status', details: error.message });
-  }
-});
-
-app.post('/queue/clear', requireApiKey, async (req, res) => {
-  try {
-    const clientPhoneE164 = process.env.CLIENT_PHONE_E164;
-    const queueService = queueServices.get(clientPhoneE164);
-    
-    if (!queueService) {
-      return res.status(404).json({ error: 'Queue service not initialized' });
-    }
-    
-    const clearedCount = await queueService.clearQueue();
-    messageQueue.length = 0;
-    console.log(`🧹 ${process.env.BRAND_NAME || 'Server'}: Cleared ${clearedCount} messages from queue`);
-    res.json({ status: 'cleared', count: clearedCount });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to clear queue', details: error.message });
-  }
-});
-
-app.get('/queue/isolation', requireApiKey, async (req, res) => {
-  try {
-    const clientPhoneE164 = process.env.CLIENT_PHONE_E164;
-    const queueService = queueServices.get(clientPhoneE164);
-    
-    if (!queueService) {
-      return res.status(404).json({ error: 'Queue service not initialized' });
-    }
-    
-    const isolation = await queueService.verifyClientIsolation();
-    res.json(isolation);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to verify isolation', details: error.message });
-  }
-});
 
 app.post('/send-message', requireApiKey, async (req, res) => {
   console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: Received /send-message request:`, req.body);
@@ -1209,8 +1010,6 @@ server.listen(PORT, () => {
   console.log(`🔗 Status endpoint: http://localhost:${PORT}/status`);
   console.log(`🔗 Health endpoint: http://localhost:${PORT}/health`);
   console.log(`🔗 Logout endpoint: http://localhost:${PORT}/logout`);
-  console.log(`🔗 Queue status endpoint: http://localhost:${PORT}/queue/status`);
-  console.log(`🔗 Clear queue endpoint: http://localhost:${PORT}/queue/clear`);
   console.log(`🔗 Socket.IO endpoint: http://localhost:${PORT}/socket.io`);
   console.log(`🔒 API Key authentication: ${process.env.API_KEY ? 'ENABLED' : 'DISABLED'}`);
   console.log(`🏷️ Brand: ${brandName} - ${process.env.BRAND_TAGLINE || 'AI Assistant'}`);

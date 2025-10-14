@@ -24,9 +24,6 @@ RUN apt-get update && \
       curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create a non-root user for security
-RUN groupadd -g 1001 aidex && useradd -m -u 1001 -g aidex -s /usr/sbin/nologin aidex
-
 # Copy package files and install dependencies
 COPY package*.json ./
 RUN npm ci --only=production && npm cache clean --force
@@ -40,12 +37,11 @@ COPY public/ ./public/
 # Verify public folder exists
 RUN [ -d ./public ] && echo "✅ Public folder included" || echo "❌ Public folder missing"
 
-# Ensure session/auth directories exist and owned by non-root user
+# Ensure session/auth directories exist with proper permissions
 RUN mkdir -p .wwebjs_auth .wwebjs_cache && \
-    chown -R aidex:aidex /usr/src/app
+    chmod 755 .wwebjs_auth .wwebjs_cache
 
-# Switch to non-root user
-USER root
+# Run as root (matches docker-compose user: root)
 
 # Expose container port
 EXPOSE 3700
