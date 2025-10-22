@@ -52,7 +52,11 @@ app.use(cors({
   methods: ['GET', 'POST'],
   credentials: true,
 }));
-app.use(bodyParser.json());
+app.use(bodyParser.json(
+  {
+    limit: '10mb'
+  }
+));
 app.use(express.static('public'));
 
 // API Key middleware for authentication
@@ -79,7 +83,9 @@ const messagesLog = [];
 const MAX_LOG = 200;
 
 const processedMessages = new Set();
+const processedMessagesByFromTimestamp = new Map();
 const MESSAGE_DEDUP_TTL = 300000;
+const MESSAGE_TIMESTAMP_WINDOW = 5000;
 
 // Session monitoring
 const sessionHealthChecks = new Map();
@@ -278,7 +284,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     startHealthMonitoring(chatbotId, client);
     
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}/api/whatsapp/webhooks`, {
+      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -299,7 +305,8 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
   });
 
   client.on('message_create', async (message) => {
-    console.log(`[message_create] from=${message.from}, to=${message.to}, fromMe=${message.fromMe}, type=${message.type}, body="${message.body}"`);
+    const msgType = message.type || 'undefined';
+    console.log(`[message_create] from=${message.from}, to=${message.to}, fromMe=${message.fromMe}, type=${msgType}, body="${message.body}"`);
   });
 
   // Process incoming personal messages only
@@ -312,19 +319,35 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         return;
       }
       
-      // Add to processed set and auto-cleanup after TTL
+      // Additional deduplication by sender + timestamp window to catch lifecycle duplicates
+      const fromTimestampKey = `${message.from}_${Math.floor(message.timestamp / MESSAGE_TIMESTAMP_WINDOW)}`;
+      if (processedMessagesByFromTimestamp.has(fromTimestampKey)) {
+        console.log(`[message] Skipping duplicate message (timestamp window): from=${message.from}, timestamp=${message.timestamp}`);
+        return;
+      }
+      
+      // Add to processed sets and auto-cleanup after TTL
       processedMessages.add(messageId);
+      processedMessagesByFromTimestamp.set(fromTimestampKey, Date.now());
       setTimeout(() => processedMessages.delete(messageId), MESSAGE_DEDUP_TTL);
+      setTimeout(() => processedMessagesByFromTimestamp.delete(fromTimestampKey), MESSAGE_DEDUP_TTL);
       
       const chat = await message.getChat().catch(() => null);
       const isGroup = chat?.isGroup === true;
       const isPersonal = message.from.endsWith('@c.us');
       const isFromMe = message.fromMe === true;
       const isStatus = message.from === 'status@broadcast';
+      const msgType = message.type || 'undefined';
       const isNotification = message.type && (message.type.includes('notification') || message.type === 'e2e_notification');
       const hasBody = message.body && message.body.trim().length > 0;
       
-      console.log(`[message] from=${message.from}, isGroup=${isGroup}, isPersonal=${isPersonal}, isFromMe=${isFromMe}, type=${message.type}, hasMedia=${message.hasMedia}, body="${message.body}", msgId=${messageId}`);
+      console.log(`[message] from=${message.from}, isGroup=${isGroup}, isPersonal=${isPersonal}, isFromMe=${isFromMe}, type=${msgType}, hasMedia=${message.hasMedia}, body="${message.body}", msgId=${messageId}`);
+
+      // Skip messages with undefined type and no media/body
+      if (!message.type && !hasBody && !message.hasMedia) {
+        console.log('[message] Ignored (undefined type with no body or media)');
+        return;
+      }
 
       // Ignore notifications, self-messages, groups, non-personal messages, and empty messages (but allow media messages)
       if (isFromMe || isGroup || !isPersonal || isStatus || (isNotification && !hasBody && !message.hasMedia)) {
@@ -336,7 +359,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
       let mediaData = null;
       if (message.hasMedia) {
         try {
-          console.log(`[message] Downloading media from ${message.from}, type: ${message.type}`);
+          console.log(`[message] Downloading media from ${message.from}, type: ${msgType}`);
           const media = await message.downloadMedia();
           if (media) {
             mediaData = {
@@ -362,7 +385,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
           body: message.body,
           id: message.id?.id || null,
           type: 'incoming',
-          messageType: message.type,
+          messageType: msgType,
           hasMedia: message.hasMedia || false,
           ...(mediaData && { 
             mediaType: mediaData.mimetype,
@@ -385,7 +408,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         from: message.from,
         email: `${message.from.split('@')[0]}@gmail.com`,
         phoneE164,
-        messageType: message.type,
+        messageType: msgType,
         hasMedia: message.hasMedia || false,
         ...(mediaData && { media: mediaData })
       };
@@ -394,7 +417,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
 
       // Call Next.js API for incoming message processing using env base URL
       const apiBase = (process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3001').replace(/\/+$/, '');
-      const response = await fetch(`${apiBase}/api/whatsapp/webhooks`, {
+      const response = await fetch(`${apiBase}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(webhookPayload),
@@ -505,7 +528,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     stopHealthMonitoring(chatbotId);
     
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}/api/whatsapp/webhooks`, {
+      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -974,7 +997,7 @@ app.post('/logout', requireApiKey, async (req, res) => {
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Client removed from memory`);
     
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}/api/whatsapp/webhooks`, {
+      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

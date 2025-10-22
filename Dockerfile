@@ -43,12 +43,13 @@ RUN mkdir -p .wwebjs_auth .wwebjs_cache && \
 
 # Run as root (matches docker-compose user: root)
 
-# Expose container port
+# Expose container port (Render uses PORT env var, default to 3700 for local)
 EXPOSE 3700
+EXPOSE 10000
 
-# Healthcheck for readiness
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:3700/healthz || exit 1
+# Healthcheck for readiness (use PORT from env or default to 3700)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-3700}/healthz || exit 1
 
 # Set Chromium and Puppeteer environment variables
 ENV CHROME_BIN=/usr/bin/chromium \

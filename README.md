@@ -1,6 +1,6 @@
 # WhatsApp Server
 
-A production-grade WhatsApp Web API server.
+A production-grade WhatsApp Web API server with Docker and Render cloud deployment support.
 
 ## Features
 
@@ -11,6 +11,29 @@ A production-grade WhatsApp Web API server.
 - Health monitoring and auto-reconnection
 - Message deduplication
 - Media file support (images, documents, audio, video)
+- Docker containerization
+- Render cloud deployment ready
+
+## Quick Start
+
+### Deploy to Render (Recommended for Production)
+1. Fork/clone this repository
+2. Create a MongoDB Atlas account and database
+3. Push to GitHub/GitLab
+4. Deploy to Render using the included `render.yaml` blueprint
+
+See [RENDER_DEPLOYMENT.md](./RENDER_DEPLOYMENT.md) for detailed deployment instructions.
+
+### Local Development with Docker
+```bash
+docker-compose up -d
+```
+
+### Local Development with Node.js
+```bash
+npm install
+npm start
+```
 
  
 

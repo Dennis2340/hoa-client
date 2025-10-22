@@ -133,6 +133,7 @@ jspm_packages/
 .git
 .gitignore
 README.md
+RENDER_DEPLOYMENT.md
 
 # Docker
 Dockerfile
