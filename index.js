@@ -82,11 +82,6 @@ const clients = new Map();
 const messagesLog = [];
 const MAX_LOG = 200;
 
-const processedMessages = new Set();
-const processedMessagesByFromTimestamp = new Map();
-const MESSAGE_DEDUP_TTL = 300000;
-const MESSAGE_TIMESTAMP_WINDOW = 5000;
-
 // Session monitoring
 const sessionHealthChecks = new Map();
 const HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
@@ -312,25 +307,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
   // Process incoming personal messages only
   client.on('message', async (message) => {
     try {
-      // Deduplicate messages using message ID
       const messageId = message.id?.id || message.id?._serialized || `${message.from}_${message.timestamp}`;
-      if (processedMessages.has(messageId)) {
-        console.log(`[message] Skipping duplicate message: ${messageId}`);
-        return;
-      }
-      
-      // Additional deduplication by sender + timestamp window to catch lifecycle duplicates
-      const fromTimestampKey = `${message.from}_${Math.floor(message.timestamp / MESSAGE_TIMESTAMP_WINDOW)}`;
-      if (processedMessagesByFromTimestamp.has(fromTimestampKey)) {
-        console.log(`[message] Skipping duplicate message (timestamp window): from=${message.from}, timestamp=${message.timestamp}`);
-        return;
-      }
-      
-      // Add to processed sets and auto-cleanup after TTL
-      processedMessages.add(messageId);
-      processedMessagesByFromTimestamp.set(fromTimestampKey, Date.now());
-      setTimeout(() => processedMessages.delete(messageId), MESSAGE_DEDUP_TTL);
-      setTimeout(() => processedMessagesByFromTimestamp.delete(fromTimestampKey), MESSAGE_DEDUP_TTL);
       
       const chat = await message.getChat().catch(() => null);
       const isGroup = chat?.isGroup === true;
