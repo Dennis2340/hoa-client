@@ -278,21 +278,10 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     
     startHealthMonitoring(chatbotId, client);
     
-    try {
-      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chatbotId,
-          event: 'connected',
-          phoneNumber,
-        }),
-      });
-      io.emit(`connected:${chatbotId}`, { phoneNumber });
-      qrCodes.delete(chatbotId);
-    } catch (error) {
-      console.error(`Error notifying Next.js for ${chatbotId}:`, error.message, error.stack);
-    }
+    // Removed Next.js API notification
+    io.emit(`connected:${chatbotId}`, { phoneNumber });
+    qrCodes.delete(chatbotId);
+    console.log(`Client connected and ready: ${phoneNumber}`);
   });
 
   client.on('authenticated', () => {
@@ -392,57 +381,42 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
 
       console.log(`[message] Webhook payload prepared: hasMedia=${webhookPayload.hasMedia}, messageType=${webhookPayload.messageType}${mediaData ? `, mediaType=${mediaData.mimetype}` : ''}`);
 
-      // Call Next.js API for incoming message processing using env base URL
-      const apiBase = (process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3001').replace(/\/+$/, '');
-      const response = await fetch(`${apiBase}`, {
+      // Call GeneLine API for incoming message processing
+      const genelineApiUrl = 'https://message.geneline-x.net/api/v1/message';
+
+
+      const genelineApiKey = '';
+      const genelineChatbotId = '';
+      
+      const genelinePayload = {
+        chatbotId: genelineChatbotId,
+        email: webhookPayload.email,
+        message: message.body || ''
+      };
+
+      console.log(`[message] Sending to GeneLine API:`, JSON.stringify(genelinePayload));
+      
+      const response = await fetch(genelineApiUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(webhookPayload),
+        headers: { 
+          'accept': 'text/plain',
+          'X-API-Key': genelineApiKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(genelinePayload),
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`[message] API error: ${response.status} - ${errorText}`);
-        throw new Error(`Failed to fetch response from local API: ${response.status} - ${errorText}`);
+        console.error(`[message] GeneLine API error: ${response.status} - ${errorText}`);
+        throw new Error(`Failed to fetch response from GeneLine API: ${response.status} - ${errorText}`);
       }
 
-      let data;
-      const responseText = await response.text();
-      console.log(`[message] Raw API response (${responseText.length} chars): ${responseText.substring(0, 500)}`);
-      
-      try {
-        data = JSON.parse(responseText);
-        console.log(`[message] Parsed API response:`, JSON.stringify(data).substring(0, 500));
-      } catch (parseError) {
-        console.error(`[message] Failed to parse API response as JSON:`, parseError.message);
-        data = {};
-      }
-      
-      // Handle different possible response formats
-      let text = '';
-      if (data && typeof data === 'object') {
-        if (data.answer) {
-          text = String(data.answer);
-        } else if (data.message) {
-          text = String(data.message);
-        } else if (data.response) {
-          text = String(data.response);
-        } else if (data.reply) {
-          text = String(data.reply);
-        } else if (data.text) {
-          text = String(data.text);
-        } else {
-          console.warn(`[message] API response does not contain expected fields. Keys present:`, Object.keys(data));
-        }
-      } else if (typeof data === 'string') {
-        text = data;
-      }
-      
-      console.log(`[message] Extracted text (${text.length} chars): ${text.substring(0, 200)}`);
-      
-      if (!text || !text.trim()) {
-        console.warn(`[message] Empty or whitespace-only response from API. Full data:`, JSON.stringify(data));
-      }
+      // GeneLine API returns plain text stream, not JSON
+      const text = await response.text();
+
+      // TODO:  format to suit WhatsApp better (line breaks, etc.)
+      console.log(`[message] GeneLine API response (${text.length} chars): ${text.substring(0, 500)}`);
 
       if (text.trim()) {
         try {
@@ -504,16 +478,10 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     // Stop health monitoring
     stopHealthMonitoring(chatbotId);
     
+    // Removed Next.js API notification
+    console.log(`Client disconnected, starting reconnection logic`);
+    
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chatbotId,
-          event: 'disconnected',
-        }),
-      });
-      
       // Enhanced reconnection logic with exponential backoff
       console.log(`Attempting to reconnect client for ${chatbotId}...`);
       let reconnectAttempts = 0;
@@ -973,19 +941,7 @@ app.post('/logout', requireApiKey, async (req, res) => {
     qrCodes.delete(chatbotId);
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Client removed from memory`);
     
-    try {
-      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          chatbotId,
-          event: 'logged_out',
-        }),
-      });
-    } catch (webhookError) {
-      console.warn(`⚠️ ${process.env.BRAND_NAME || 'Server'}: Error notifying webhook:`, webhookError.message);
-    }
-    
+    // Removed Next.js API notification
     console.log(`🔓 ${process.env.BRAND_NAME || 'Server'}: Logout complete. Ready for new session initialization.`);
     res.status(200).json({ 
       status: 'logged_out', 
