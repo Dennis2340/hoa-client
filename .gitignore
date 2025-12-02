@@ -4,3 +4,5 @@ node_modules/
 .env
 
 Untitled-1
+
+bun.lock
