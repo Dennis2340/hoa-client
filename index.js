@@ -82,6 +82,61 @@ const clients = new Map();
 const messagesLog = [];
 const MAX_LOG = 200;
 
+// Convert markdown to WhatsApp formatting
+function convertMarkdownToWhatsApp(text) {
+  if (!text || typeof text !== 'string') return text;
+  
+  let converted = text;
+  
+  // Convert headers (# Header) to *Bold*
+  converted = converted.replace(/^#{1,6}\s+(.+)$/gm, '*$1*');
+  
+  // Convert bold (**text** or __text__) to WhatsApp bold (*text*)
+  converted = converted.replace(/\*\*(.+?)\*\*/g, '*$1*');
+  converted = converted.replace(/__(.+?)__/g, '*$1*');
+  
+  // Convert italic (*text* or _text_) to WhatsApp italic (_text_)
+  // But be careful not to affect already converted bold
+  converted = converted.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '_$1_');
+  converted = converted.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, '_$1_');
+  
+  // Convert strikethrough (~~text~~) to WhatsApp strikethrough (~text~)
+  converted = converted.replace(/~~(.+?)~~/g, '~$1~');
+  
+  // Convert code blocks (```code```) to WhatsApp monospace (```code```)
+  // WhatsApp already uses triple backticks, so keep them as is
+  
+  // Convert inline code (`code`) to WhatsApp monospace (```code```)
+  converted = converted.replace(/`([^`]+)`/g, '```$1```');
+  
+  // Convert markdown links [text](url) to "text: url"
+  converted = converted.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1: $2');
+  
+  // Convert bullet lists (- item or * item) to WhatsApp format (• item)
+  converted = converted.replace(/^[*-]\s+(.+)$/gm, '• $1');
+  
+  // Convert numbered lists - handle various formats
+  // Handle both "1." and "1)" formats on new lines
+  converted = converted.replace(/^(\d+)[.)]\s+(.+)$/gm, '$1. $2');
+  
+  // Handle inline numbered lists with commas (e.g., "1, 2, 3" or "1. Item, 2. Item, 3. Item")
+  // Convert to newline-separated list
+  converted = converted.replace(/(\d+\.?\s+[^,\n]+),\s+(?=\d+\.?\s+)/g, '$1\n');
+  
+  // Ensure numbered lists that run together have proper line breaks
+  // Replace sequences like "1. item1 2. item2" with proper newlines
+  converted = converted.replace(/(\d+\.\s+[^\n]+?)\s+(\d+\.\s+)/g, '$1\n$2');
+  
+  // Handle simple comma-separated numbers that should be a list
+  // e.g., "Options: 1, 2, 3, 4" -> "Options:\n1.\n2.\n3.\n4."
+  converted = converted.replace(/(\d+)\s*,\s*(?=\d+(?:\s*,|\s*$))/g, '$1\n');
+  
+  // Remove excessive newlines (more than 2 consecutive)
+  converted = converted.replace(/\n{3,}/g, '\n\n');
+  
+  return converted.trim();
+}
+
 // Session monitoring
 const sessionHealthChecks = new Map();
 const HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
@@ -415,19 +470,22 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
       // GeneLine API returns plain text stream, not JSON
       const text = await response.text();
 
-      // TODO:  format to suit WhatsApp better (line breaks, etc.)
       console.log(`[message] GeneLine API response (${text.length} chars): ${text.substring(0, 500)}`);
 
       if (text.trim()) {
         try {
-          await client.sendMessage(message.from, text);
-          console.log(`[message] Reply sent to ${message.from}: ${text}`);
+          // Convert markdown to WhatsApp format
+          const whatsappFormattedText = convertMarkdownToWhatsApp(text);
+          console.log(`[message] Converted to WhatsApp format (${whatsappFormattedText.length} chars)`);
+          
+          await client.sendMessage(message.from, whatsappFormattedText);
+          console.log(`[message] Reply sent to ${message.from}: ${whatsappFormattedText.substring(0, 200)}...`);
           try {
             messagesLog.push({
               ts: new Date().toISOString(),
               from: 'bot',
               to: message.from,
-              body: text,
+              body: whatsappFormattedText,
               id: null,
               type: 'outgoing',
             });
