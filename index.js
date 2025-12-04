@@ -40,7 +40,7 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3001' || "https://rag-x.dev/",
+    origin: process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3000' || "https://rag-x.dev/",
     methods: ['GET', 'POST'],
     credentials: true,
   },
