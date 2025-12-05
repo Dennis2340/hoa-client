@@ -48,7 +48,7 @@ const io = new Server(server, {
 });
 
 app.use(cors({
-  origin: process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3001' || "https://rag-x.dev/",
+  origin: process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3000' || "https://rag-x.dev/",
   methods: ['GET', 'POST'],
   credentials: true,
 }));
@@ -257,17 +257,37 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
   if (clients.has(chatbotId)) {
     const client = clients.get(chatbotId);
     try {
-      const isConnected = client?.info?.wid?.user ? true : false;
-      if (isConnected) {
-        console.log(`Client already connected for ${chatbotId}: ${client.info.wid.user}`);
+      // Check actual connection state, not just cached info
+      const state = await client.getState().catch(() => null);
+      const isActuallyConnected = state && !['UNPAIRED', 'UNPAIRED_IDLE', 'CONFLICT', 'UNLAUNCHED'].includes(state);
+      const hasPhoneNumber = client?.info?.wid?.user;
+      
+      if (isActuallyConnected && hasPhoneNumber) {
+        console.log(`Client already connected for ${chatbotId}: ${client.info.wid.user} (state: ${state})`);
         return { status: 'connected', phoneNumber: client.info.wid.user };
       } else if (qrCodes.has(chatbotId)) {
-        console.log(`Client awaiting QR scan for ${chatbotId}`);
+        console.log(`Client awaiting QR scan for ${chatbotId} (state: ${state})`);
         return { status: 'awaiting_qr', qr: qrCodes.get(chatbotId)?.base64 };
+      } else {
+        // Client exists but is not connected - clean it up
+        console.warn(`Client exists but is not connected for ${chatbotId} (state: ${state}). Cleaning up...`);
+        clients.delete(chatbotId);
+        qrCodes.delete(chatbotId);
+        stopHealthMonitoring(chatbotId);
+        if (client) {
+          try {
+            await client.destroy();
+          } catch (destroyError) {
+            console.error(`Error destroying disconnected client for ${chatbotId}:`, destroyError.message);
+          }
+        }
+        // Continue to create new client below
       }
     } catch (error) {
       console.error(`Error checking client status for ${chatbotId}:`, error.message, error.stack);
       clients.delete(chatbotId);
+      qrCodes.delete(chatbotId);
+      stopHealthMonitoring(chatbotId);
       if (client) {
         try {
           await client.destroy();
@@ -275,6 +295,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
           console.error(`Error destroying stale client for ${chatbotId}:`, destroyError.message);
         }
       }
+      // Continue to create new client below
     }
   }
 
@@ -297,9 +318,11 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
 
   client.on('loading_screen', (percent, message) => {
     console.log(`Loading screen for ${chatbotId}: ${percent}% - ${message}`);
+    io.emit(`status:${chatbotId}`, { status: 'loading', percent, message });
   });
   client.on('change_state', (state) => {
     console.log(`Client state changed for ${chatbotId}:`, state);
+    io.emit(`status:${chatbotId}`, { status: 'state_change', state });
   });
   client.on('loading_failed', (event) => {
     console.error(`Loading failed for ${chatbotId}:`, event);
@@ -320,7 +343,9 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         }
       });
       qrCodes.set(chatbotId, { qr, base64 });
+      // Emit both QR code and status update
       io.emit(`qr:${chatbotId}`, base64);
+      io.emit(`status:${chatbotId}`, { status: 'qr_generated', message: 'Scan QR code to connect' });
       console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: QR code generated successfully`);
     } catch (error) {
       console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error generating QR code for ${chatbotId}:`, error.message, error.stack);
@@ -333,14 +358,16 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     
     startHealthMonitoring(chatbotId, client);
     
-    // Removed Next.js API notification
+    // Emit connection success to frontend
     io.emit(`connected:${chatbotId}`, { phoneNumber });
+    io.emit(`status:${chatbotId}`, { status: 'connected', phoneNumber, message: 'WhatsApp connected successfully' });
     qrCodes.delete(chatbotId);
     console.log(`Client connected and ready: ${phoneNumber}`);
   });
 
   client.on('authenticated', () => {
     console.log(`🔐 ${process.env.BRAND_NAME || 'Server'}: Session authenticated for ${chatbotId}`);
+    io.emit(`status:${chatbotId}`, { status: 'authenticating', message: 'Authentication successful, loading...' });
   });
 
   client.on('message_create', async (message) => {
@@ -441,7 +468,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
 
 
       const genelineApiKey = 'b5a5a2b9aadef40dec688ed92b1464e59719deb13b6d7425820b30c16d21392d';
-      const genelineChatbotId = 'cmiounofx0003jj043l87laro';
+      const genelineChatbotId = 'cmis6o6ps0001l404u6l8hizq';
       
       const genelinePayload = {
         chatbotId: genelineChatbotId,
@@ -536,8 +563,25 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     // Stop health monitoring
     stopHealthMonitoring(chatbotId);
     
-    // Removed Next.js API notification
-    console.log(`Client disconnected, starting reconnection logic`);
+    // Check if this is an intentional logout - don't reconnect
+    if (reason === 'LOGOUT') {
+      console.log(`${process.env.BRAND_NAME || 'Server'}: User logged out intentionally. Cleaning up without reconnection.`);
+      clients.delete(chatbotId);
+      qrCodes.delete(chatbotId);
+      try {
+        await client.destroy();
+        console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Client destroyed after logout`);
+      } catch (destroyError) {
+        console.error(`Error destroying client after logout:`, destroyError.message);
+      }
+      // Emit disconnected event to frontend
+      io.emit(`disconnected:${chatbotId}`, { reason: 'logout' });
+      console.log(`🔓 ${process.env.BRAND_NAME || 'Server'}: User needs to call /init to get new QR code`);
+      return; // Exit without reconnection
+    }
+    
+    // For unexpected disconnections, attempt reconnection
+    console.log(`Client disconnected unexpectedly, starting reconnection logic`);
     
     try {
       // Enhanced reconnection logic with exponential backoff
@@ -568,6 +612,9 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
               console.error(`Error destroying client on disconnect for ${chatbotId}:`, destroyError.message);
             }
             
+            // Notify frontend about failed reconnection
+            io.emit(`disconnected:${chatbotId}`, { reason: 'reconnection_failed' });
+            
             // Schedule a fresh initialization after 5 minutes
             setTimeout(() => {
               console.log(`Attempting fresh initialization for ${chatbotId} after extended delay`);
@@ -579,7 +626,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         }
       }
     } catch (error) {
-      console.error(`Error notifying Next.js for ${chatbotId}:`, error.message, error.stack);
+      console.error(`Error during reconnection for ${chatbotId}:`, error.message, error.stack);
     }
   });
 
