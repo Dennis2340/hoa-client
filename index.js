@@ -467,8 +467,8 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
       const genelineApiUrl = 'https://message.geneline-x.net/api/v1/message';
 
 
-      const genelineApiKey = 'b5a5a2b9aadef40dec688ed92b1464e59719deb13b6d7425820b30c16d21392d';
-      const genelineChatbotId = 'cmis6o6ps0001l404u6l8hizq';
+      const genelineApiKey = '4ebaede40e4e101ae291524fead10e684b9941a21e5fec7f104e466f692a9d98';
+      const genelineChatbotId = 'cmitgk1cd0003l704cstytfqs';
       
       const genelinePayload = {
         chatbotId: genelineChatbotId,
