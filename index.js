@@ -40,7 +40,8 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3000' || "https://rag-x.dev/",
+    // origin: process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3001' || "https://rag-x.dev/",
+    origin: "*",
     methods: ['GET', 'POST'],
     credentials: true,
   },
@@ -48,7 +49,8 @@ const io = new Server(server, {
 });
 
 app.use(cors({
-  origin: process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3000' || "https://rag-x.dev/",
+  // origin: process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3001' || "https://rag-x.dev/",
+  origin: "*",
   methods: ['GET', 'POST'],
   credentials: true,
 }));
@@ -82,64 +84,9 @@ const clients = new Map();
 const messagesLog = [];
 const MAX_LOG = 200;
 
-// Convert markdown to WhatsApp formatting
-function convertMarkdownToWhatsApp(text) {
-  if (!text || typeof text !== 'string') return text;
-  
-  let converted = text;
-  
-  // Convert headers (# Header) to *Bold*
-  converted = converted.replace(/^#{1,6}\s+(.+)$/gm, '*$1*');
-  
-  // Convert bold (**text** or __text__) to WhatsApp bold (*text*)
-  converted = converted.replace(/\*\*(.+?)\*\*/g, '*$1*');
-  converted = converted.replace(/__(.+?)__/g, '*$1*');
-  
-  // Convert italic (*text* or _text_) to WhatsApp italic (_text_)
-  // But be careful not to affect already converted bold
-  converted = converted.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '_$1_');
-  converted = converted.replace(/(?<!_)_(?!_)(.+?)(?<!_)_(?!_)/g, '_$1_');
-  
-  // Convert strikethrough (~~text~~) to WhatsApp strikethrough (~text~)
-  converted = converted.replace(/~~(.+?)~~/g, '~$1~');
-  
-  // Convert code blocks (```code```) to WhatsApp monospace (```code```)
-  // WhatsApp already uses triple backticks, so keep them as is
-  
-  // Convert inline code (`code`) to WhatsApp monospace (```code```)
-  converted = converted.replace(/`([^`]+)`/g, '```$1```');
-  
-  // Convert markdown links [text](url) to "text: url"
-  converted = converted.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1: $2');
-  
-  // Convert bullet lists (- item or * item) to WhatsApp format (• item)
-  converted = converted.replace(/^[*-]\s+(.+)$/gm, '• $1');
-  
-  // Convert numbered lists - handle various formats
-  // Handle both "1." and "1)" formats on new lines
-  converted = converted.replace(/^(\d+)[.)]\s+(.+)$/gm, '$1. $2');
-  
-  // Handle inline numbered lists with commas (e.g., "1, 2, 3" or "1. Item, 2. Item, 3. Item")
-  // Convert to newline-separated list
-  converted = converted.replace(/(\d+\.?\s+[^,\n]+),\s+(?=\d+\.?\s+)/g, '$1\n');
-  
-  // Ensure numbered lists that run together have proper line breaks
-  // Replace sequences like "1. item1 2. item2" with proper newlines
-  converted = converted.replace(/(\d+\.\s+[^\n]+?)\s+(\d+\.\s+)/g, '$1\n$2');
-  
-  // Handle simple comma-separated numbers that should be a list
-  // e.g., "Options: 1, 2, 3, 4" -> "Options:\n1.\n2.\n3.\n4."
-  converted = converted.replace(/(\d+)\s*,\s*(?=\d+(?:\s*,|\s*$))/g, '$1\n');
-  
-  // Remove excessive newlines (more than 2 consecutive)
-  converted = converted.replace(/\n{3,}/g, '\n\n');
-  
-  return converted.trim();
-}
-
 // Session monitoring
 const sessionHealthChecks = new Map();
-const HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
+const HEALTH_CHECK_INTERVAL = 30000; // 30 secondsAdd
 const SESSION_TIMEOUT = 300000; // 5 minutes without activity before considering unhealthy
 
 // Message queue helper functions
@@ -257,37 +204,17 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
   if (clients.has(chatbotId)) {
     const client = clients.get(chatbotId);
     try {
-      // Check actual connection state, not just cached info
-      const state = await client.getState().catch(() => null);
-      const isActuallyConnected = state && !['UNPAIRED', 'UNPAIRED_IDLE', 'CONFLICT', 'UNLAUNCHED'].includes(state);
-      const hasPhoneNumber = client?.info?.wid?.user;
-      
-      if (isActuallyConnected && hasPhoneNumber) {
-        console.log(`Client already connected for ${chatbotId}: ${client.info.wid.user} (state: ${state})`);
+      const isConnected = client?.info?.wid?.user ? true : false;
+      if (isConnected) {
+        console.log(`Client already connected for ${chatbotId}: ${client.info.wid.user}`);
         return { status: 'connected', phoneNumber: client.info.wid.user };
       } else if (qrCodes.has(chatbotId)) {
-        console.log(`Client awaiting QR scan for ${chatbotId} (state: ${state})`);
+        console.log(`Client awaiting QR scan for ${chatbotId}`);
         return { status: 'awaiting_qr', qr: qrCodes.get(chatbotId)?.base64 };
-      } else {
-        // Client exists but is not connected - clean it up
-        console.warn(`Client exists but is not connected for ${chatbotId} (state: ${state}). Cleaning up...`);
-        clients.delete(chatbotId);
-        qrCodes.delete(chatbotId);
-        stopHealthMonitoring(chatbotId);
-        if (client) {
-          try {
-            await client.destroy();
-          } catch (destroyError) {
-            console.error(`Error destroying disconnected client for ${chatbotId}:`, destroyError.message);
-          }
-        }
-        // Continue to create new client below
       }
     } catch (error) {
       console.error(`Error checking client status for ${chatbotId}:`, error.message, error.stack);
       clients.delete(chatbotId);
-      qrCodes.delete(chatbotId);
-      stopHealthMonitoring(chatbotId);
       if (client) {
         try {
           await client.destroy();
@@ -295,7 +222,6 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
           console.error(`Error destroying stale client for ${chatbotId}:`, destroyError.message);
         }
       }
-      // Continue to create new client below
     }
   }
 
@@ -318,11 +244,9 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
 
   client.on('loading_screen', (percent, message) => {
     console.log(`Loading screen for ${chatbotId}: ${percent}% - ${message}`);
-    io.emit(`status:${chatbotId}`, { status: 'loading', percent, message });
   });
   client.on('change_state', (state) => {
     console.log(`Client state changed for ${chatbotId}:`, state);
-    io.emit(`status:${chatbotId}`, { status: 'state_change', state });
   });
   client.on('loading_failed', (event) => {
     console.error(`Loading failed for ${chatbotId}:`, event);
@@ -343,9 +267,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         }
       });
       qrCodes.set(chatbotId, { qr, base64 });
-      // Emit both QR code and status update
       io.emit(`qr:${chatbotId}`, base64);
-      io.emit(`status:${chatbotId}`, { status: 'qr_generated', message: 'Scan QR code to connect' });
       console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: QR code generated successfully`);
     } catch (error) {
       console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error generating QR code for ${chatbotId}:`, error.message, error.stack);
@@ -358,16 +280,28 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     
     startHealthMonitoring(chatbotId, client);
     
-    // Emit connection success to frontend
-    io.emit(`connected:${chatbotId}`, { phoneNumber });
-    io.emit(`status:${chatbotId}`, { status: 'connected', phoneNumber, message: 'WhatsApp connected successfully' });
-    qrCodes.delete(chatbotId);
-    console.log(`Client connected and ready: ${phoneNumber}`);
+    try {
+      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.AGENT_API_KEY
+        },
+        body: JSON.stringify({
+          chatbotId,
+          event: 'connected',
+          phoneNumber,
+        }),
+      });
+      io.emit(`connected:${chatbotId}`, { phoneNumber });
+      qrCodes.delete(chatbotId);
+    } catch (error) {
+      console.error(`Error notifying Next.js for ${chatbotId}:`, error.message, error.stack);
+    }
   });
 
   client.on('authenticated', () => {
     console.log(`🔐 ${process.env.BRAND_NAME || 'Server'}: Session authenticated for ${chatbotId}`);
-    io.emit(`status:${chatbotId}`, { status: 'authenticating', message: 'Authentication successful, loading...' });
   });
 
   client.on('message_create', async (message) => {
@@ -389,7 +323,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
       const isNotification = message.type && (message.type.includes('notification') || message.type === 'e2e_notification');
       const hasBody = message.body && message.body.trim().length > 0;
       
-      console.log(`[message] from=${message.from}, isGroup=${isGroup}, isPersonal=${isPersonal}, isFromMe=${isFromMe}, type=${msgType}, hasMedia=${message.hasMedia}, body="${message.body}", msgId=${messageId}`);
+      console.log(`[message] from=${message.from}, isGroup=${isGroup}, isPersonal=${isPersonal}, isFromMe=${isFromMe}, type=${msgType}, hasMedia=${message.hasMedia}, hasLocation=${!!message.location}, body="${message.body}", msgId=${messageId}`);
 
       // Skip messages with undefined type and no media/body
       if (!message.type && !hasBody && !message.hasMedia) {
@@ -439,6 +373,11 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
             mediaType: mediaData.mimetype,
             mediaSize: mediaData.size,
             mediaFilename: mediaData.filename
+          }),
+          ...(message.location && {
+            hasLocation: true,
+            latitude: message.location.latitude,
+            longitude: message.location.longitude
           })
         });
         if (messagesLog.length > MAX_LOG) messagesLog.shift();
@@ -447,6 +386,17 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
       // Derive phoneE164 from JID if possible (e.g., "1234567890@c.us" -> "+1234567890")
       const jidLocal = (message.from || '').split('@')[0] || '';
       const phoneE164 = /^\d{6,15}$/.test(jidLocal) ? `+${jidLocal}` : undefined;
+
+      // Extract location data if message type is location
+      let locationData = null;
+      if (msgType === 'location' && message.location) {
+        locationData = {
+          latitude: message.location.latitude,
+          longitude: message.location.longitude,
+          description: message.location.description || message.body || ''
+        };
+        console.log(`[message] Location shared: lat=${locationData.latitude}, lng=${locationData.longitude}, description="${locationData.description}"`);
+      }
 
       // Prepare webhook payload
       const webhookPayload = {
@@ -458,61 +408,77 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         phoneE164,
         messageType: msgType,
         hasMedia: message.hasMedia || false,
-        ...(mediaData && { media: mediaData })
+        ...(mediaData && { media: mediaData }),
+        ...(locationData && { location: locationData })
       };
 
-      console.log(`[message] Webhook payload prepared: hasMedia=${webhookPayload.hasMedia}, messageType=${webhookPayload.messageType}${mediaData ? `, mediaType=${mediaData.mimetype}` : ''}`);
+      console.log(`[message] Webhook payload prepared: hasMedia=${webhookPayload.hasMedia}, messageType=${webhookPayload.messageType}${mediaData ? `, mediaType=${mediaData.mimetype}` : ''}${locationData ? `, hasLocation=true` : ''}`);
 
-      // Call GeneLine API for incoming message processing
-      const genelineApiUrl = 'https://message.geneline-x.net/api/v1/message';
-
-
-      const genelineApiKey = '4ebaede40e4e101ae291524fead10e684b9941a21e5fec7f104e466f692a9d98';
-      const genelineChatbotId = 'cmitgk1cd0003l704cstytfqs';
-      
-      const genelinePayload = {
-        chatbotId: genelineChatbotId,
-        email: webhookPayload.email,
-        message: message.body || ''
-      };
-
-      console.log(`[message] Sending to GeneLine API:`, JSON.stringify(genelinePayload));
-      
-      const response = await fetch(genelineApiUrl, {
+      // Call Next.js API for incoming message processing using env base URL
+      const apiBase = (process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+      const response = await fetch(`${apiBase}`, {
         method: 'POST',
         headers: { 
-          'accept': 'text/plain',
-          'X-API-Key': genelineApiKey,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.AGENT_API_KEY
         },
-        body: JSON.stringify(genelinePayload),
+        body: JSON.stringify(webhookPayload),
       });
 
       if (!response.ok) {
         const errorText = await response.text();
-        console.error(`[message] GeneLine API error: ${response.status} - ${errorText}`);
-        throw new Error(`Failed to fetch response from GeneLine API: ${response.status} - ${errorText}`);
+        console.error(`[message] API error: ${response.status} - ${errorText}`);
+        throw new Error(`Failed to fetch response from local API: ${response.status} - ${errorText}`);
       }
 
-      // GeneLine API returns plain text stream, not JSON
-      const text = await response.text();
-
-      console.log(`[message] GeneLine API response (${text.length} chars): ${text.substring(0, 500)}`);
+      let data;
+      const responseText = await response.text();
+      console.log(`[message] Raw API response (${responseText.length} chars): ${responseText.substring(0, 500)}`);
+      
+      try {
+        data = JSON.parse(responseText);
+        console.log(`[message] Parsed API response:`, JSON.stringify(data).substring(0, 500));
+      } catch (parseError) {
+        console.error(`[message] Failed to parse API response as JSON:`, parseError.message);
+        data = {};
+      }
+      
+      // Handle different possible response formats
+      let text = '';
+      if (data && typeof data === 'object') {
+        if (data.answer) {
+          text = String(data.answer);
+        } else if (data.message) {
+          text = String(data.message);
+        } else if (data.response) {
+          text = String(data.response);
+        } else if (data.reply) {
+          text = String(data.reply);
+        } else if (data.text) {
+          text = String(data.text);
+        } else {
+          console.warn(`[message] API response does not contain expected fields. Keys present:`, Object.keys(data));
+        }
+      } else if (typeof data === 'string') {
+        text = data;
+      }
+      
+      console.log(`[message] Extracted text (${text.length} chars): ${text.substring(0, 200)}`);
+      
+      if (!text || !text.trim()) {
+        console.warn(`[message] Empty or whitespace-only response from API. Full data:`, JSON.stringify(data));
+      }
 
       if (text.trim()) {
         try {
-          // Convert markdown to WhatsApp format
-          const whatsappFormattedText = convertMarkdownToWhatsApp(text);
-          console.log(`[message] Converted to WhatsApp format (${whatsappFormattedText.length} chars)`);
-          
-          await client.sendMessage(message.from, whatsappFormattedText);
-          console.log(`[message] Reply sent to ${message.from}: ${whatsappFormattedText.substring(0, 200)}...`);
+          await client.sendMessage(message.from, text);
+          console.log(`[message] Reply sent to ${message.from}: ${text}`);
           try {
             messagesLog.push({
               ts: new Date().toISOString(),
               from: 'bot',
               to: message.from,
-              body: whatsappFormattedText,
+              body: text,
               id: null,
               type: 'outgoing',
             });
@@ -563,27 +529,19 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     // Stop health monitoring
     stopHealthMonitoring(chatbotId);
     
-    // Check if this is an intentional logout - don't reconnect
-    if (reason === 'LOGOUT') {
-      console.log(`${process.env.BRAND_NAME || 'Server'}: User logged out intentionally. Cleaning up without reconnection.`);
-      clients.delete(chatbotId);
-      qrCodes.delete(chatbotId);
-      try {
-        await client.destroy();
-        console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Client destroyed after logout`);
-      } catch (destroyError) {
-        console.error(`Error destroying client after logout:`, destroyError.message);
-      }
-      // Emit disconnected event to frontend
-      io.emit(`disconnected:${chatbotId}`, { reason: 'logout' });
-      console.log(`🔓 ${process.env.BRAND_NAME || 'Server'}: User needs to call /init to get new QR code`);
-      return; // Exit without reconnection
-    }
-    
-    // For unexpected disconnections, attempt reconnection
-    console.log(`Client disconnected unexpectedly, starting reconnection logic`);
-    
     try {
+      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.AGENT_API_KEY
+        },
+        body: JSON.stringify({
+          chatbotId,
+          event: 'disconnected',
+        }),
+      });
+      
       // Enhanced reconnection logic with exponential backoff
       console.log(`Attempting to reconnect client for ${chatbotId}...`);
       let reconnectAttempts = 0;
@@ -612,9 +570,6 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
               console.error(`Error destroying client on disconnect for ${chatbotId}:`, destroyError.message);
             }
             
-            // Notify frontend about failed reconnection
-            io.emit(`disconnected:${chatbotId}`, { reason: 'reconnection_failed' });
-            
             // Schedule a fresh initialization after 5 minutes
             setTimeout(() => {
               console.log(`Attempting fresh initialization for ${chatbotId} after extended delay`);
@@ -626,7 +581,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         }
       }
     } catch (error) {
-      console.error(`Error during reconnection for ${chatbotId}:`, error.message, error.stack);
+      console.error(`Error notifying Next.js for ${chatbotId}:`, error.message, error.stack);
     }
   });
 
@@ -1046,7 +1001,22 @@ app.post('/logout', requireApiKey, async (req, res) => {
     qrCodes.delete(chatbotId);
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Client removed from memory`);
     
-    // Removed Next.js API notification
+    try {
+      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.AGENT_API_KEY
+        },
+        body: JSON.stringify({
+          chatbotId,
+          event: 'logged_out',
+        }),
+      });
+    } catch (webhookError) {
+      console.warn(`⚠️ ${process.env.BRAND_NAME || 'Server'}: Error notifying webhook:`, webhookError.message);
+    }
+    
     console.log(`🔓 ${process.env.BRAND_NAME || 'Server'}: Logout complete. Ready for new session initialization.`);
     res.status(200).json({ 
       status: 'logged_out', 
