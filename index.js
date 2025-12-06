@@ -316,7 +316,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
       
       const chat = await message.getChat().catch(() => null);
       const isGroup = chat?.isGroup === true;
-      const isPersonal = message.from.endsWith('@c.us');
+      const isPersonal = message.from.endsWith('@c.us') || message.from.endsWith('@lid');
       const isFromMe = message.fromMe === true;
       const isStatus = message.from === 'status@broadcast';
       const msgType = message.type || 'undefined';
@@ -529,6 +529,18 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     // Stop health monitoring
     stopHealthMonitoring(chatbotId);
     
+    // Clean up client resources immediately
+    clients.delete(chatbotId);
+    qrCodes.delete(chatbotId);
+    
+    try {
+      await client.destroy();
+      console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Client destroyed after disconnect`);
+    } catch (destroyError) {
+      console.error(`Error destroying client on disconnect for ${chatbotId}:`, destroyError.message);
+    }
+    
+    // Notify webhook about disconnection
     try {
       await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
         method: 'POST',
@@ -539,50 +551,15 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         body: JSON.stringify({
           chatbotId,
           event: 'disconnected',
+          reason: reason
         }),
       });
-      
-      // Enhanced reconnection logic with exponential backoff
-      console.log(`Attempting to reconnect client for ${chatbotId}...`);
-      let reconnectAttempts = 0;
-      const maxReconnectAttempts = 5;
-      
-      while (reconnectAttempts < maxReconnectAttempts) {
-        try {
-          const backoffDelay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-          console.log(`Reconnect attempt ${reconnectAttempts + 1}/${maxReconnectAttempts} after ${backoffDelay}ms delay`);
-          await new Promise(resolve => setTimeout(resolve, backoffDelay));
-          
-          await client.initialize();
-          console.log(`Successfully reconnected client for ${chatbotId}`);
-          return; // Success, exit the function
-        } catch (reconnectError) {
-          reconnectAttempts++;
-          console.error(`Reconnect attempt ${reconnectAttempts} failed for ${chatbotId}:`, reconnectError.message);
-          
-          if (reconnectAttempts >= maxReconnectAttempts) {
-            console.error(`All reconnection attempts failed for ${chatbotId}. Cleaning up...`);
-            clients.delete(chatbotId);
-            qrCodes.delete(chatbotId);
-            try {
-              await client.destroy();
-            } catch (destroyError) {
-              console.error(`Error destroying client on disconnect for ${chatbotId}:`, destroyError.message);
-            }
-            
-            // Schedule a fresh initialization after 5 minutes
-            setTimeout(() => {
-              console.log(`Attempting fresh initialization for ${chatbotId} after extended delay`);
-              initializeClient().catch(error => {
-                console.error(`Fresh initialization failed for ${chatbotId}:`, error.message);
-              });
-            }, 300000); // 5 minutes
-          }
-        }
-      }
+      console.log(`📢 ${process.env.BRAND_NAME || 'Server'}: Webhook notified about disconnection`);
     } catch (error) {
-      console.error(`Error notifying Next.js for ${chatbotId}:`, error.message, error.stack);
+      console.error(`Error notifying webhook for ${chatbotId}:`, error.message);
     }
+    
+    console.log(`🛑 ${process.env.BRAND_NAME || 'Server'}: Client cleanup complete. No automatic reconnection. Use /init endpoint to reconnect.`);
   });
 
   client.on('auth_failure', async (msg) => {
@@ -805,7 +782,7 @@ app.post('/send-message', requireApiKey, async (req, res) => {
     console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Missing required fields in /send-message: ${JSON.stringify({ to, body })}`);
     return res.status(400).json({ error: 'Missing to or body', details: { to, body } });
   }
-  if (!to.endsWith('@c.us')) {
+  if (!to.endsWith('@c.us') && !to.endsWith('@lid')) {
     console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Invalid recipient for ${to}: must be personal chat (@c.us)`);
     return res.status(400).json({ error: 'Invalid recipient', details: 'Recipient must be a personal chat (@c.us)' });
   }
