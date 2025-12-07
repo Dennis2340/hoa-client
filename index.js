@@ -859,30 +859,54 @@ app.post('/send-message', requireApiKey, async (req, res) => {
       });
     }
 
-    // Extract phone number from JID (e.g., "23279648205@c.us" -> "23279648205")
-    const phoneNumber = to.split('@')[0];
-    console.log(`🔍 ${process.env.BRAND_NAME || 'Server'}: Validating number ${phoneNumber} on WhatsApp...`);
+    // Extract identifier from JID (e.g., "23279648205@c.us" -> "23279648205" or "165171792240645@lid" -> "165171792240645")
+    const identifier = to.split('@')[0];
+    const jidType = to.split('@')[1]; // 'c.us' or 'lid'
+    const isLidAccount = jidType === 'lid';
     
-    // Validate the number is on WhatsApp and get proper JID
+    console.log(`🔍 ${process.env.BRAND_NAME || 'Server'}: Processing ${isLidAccount ? 'LID account' : 'regular number'}: ${identifier}@${jidType}`);
+    
     let numberId;
-    try {
-      numberId = await client.getNumberId(phoneNumber);
-    } catch (getNumberError) {
-      console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error validating number:`, getNumberError.message);
-      // If validation fails, try using the original 'to' JID as fallback
-      console.warn(`⚠️ ${process.env.BRAND_NAME || 'Server'}: Falling back to original JID: ${to}`);
+    
+    // Handle LID accounts differently - they don't follow phone number validation rules
+    if (isLidAccount) {
+      console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: LID account detected, using JID directly: ${to}`);
+      // For LID accounts, use the JID as-is without validation
       numberId = { _serialized: to };
+    } else {
+      // For regular phone numbers, validate format before attempting to use it
+      if (!/^\d{6,15}$/.test(identifier)) {
+        console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Invalid phone number format: ${identifier} (expected 6-15 digits)`);
+        return res.status(400).json({ 
+          error: 'Invalid phone number format', 
+          details: `Phone number "${identifier}" is invalid. Expected 6-15 digits in international format without + (e.g., 1234567890).`,
+          receivedJID: to,
+          extractedNumber: identifier
+        });
+      }
+      
+      console.log(`🔍 ${process.env.BRAND_NAME || 'Server'}: Validating number ${identifier} on WhatsApp...`);
+      
+      // Validate the number is on WhatsApp and get proper JID
+      try {
+        numberId = await client.getNumberId(identifier);
+      } catch (getNumberError) {
+        console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error validating number:`, getNumberError.message);
+        // If validation fails, try using the original 'to' JID as fallback
+        console.warn(`⚠️ ${process.env.BRAND_NAME || 'Server'}: Falling back to original JID: ${to}`);
+        numberId = { _serialized: to };
+      }
+      
+      if (!numberId || !numberId._serialized) {
+        console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Number ${identifier} is not registered on WhatsApp`);
+        return res.status(404).json({ 
+          error: 'Number not on WhatsApp', 
+          details: `The number ${identifier} is not registered on WhatsApp` 
+        });
+      }
     }
     
-    if (!numberId || !numberId._serialized) {
-      console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Number ${phoneNumber} is not registered on WhatsApp`);
-      return res.status(404).json({ 
-        error: 'Number not on WhatsApp', 
-        details: `The number ${phoneNumber} is not registered on WhatsApp` 
-      });
-    }
-    
-    console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Number validated. Using JID: ${numberId._serialized}`);
+    console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: ${isLidAccount ? 'LID account' : 'Number'} validated. Using JID: ${numberId._serialized}`);
     
     // Use retry logic to send the message
     const result = await sendMessageWithRetry(client, numberId._serialized, body, 3);
