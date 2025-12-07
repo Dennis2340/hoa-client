@@ -775,6 +775,57 @@ app.get('/logs/messages', requireApiKey, (req, res) => {
 });
 
 
+// Helper function to send message with retry logic
+async function sendMessageWithRetry(client, jid, message, maxRetries = 3) {
+  let lastError;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`📤 Attempt ${attempt}/${maxRetries} to send message to ${jid}`);
+      
+      // Progressive delay between attempts
+      if (attempt > 1) {
+        const delayMs = 1000 * attempt; // 1s, 2s, 3s
+        console.log(`⏳ Waiting ${delayMs}ms before retry...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+      
+      // Try to get the chat first to ensure it's in cache
+      try {
+        const chat = await client.getChatById(jid);
+        console.log(`✅ Chat found/loaded: ${chat.name || jid}`);
+      } catch (chatError) {
+        console.warn(`⚠️ Could not pre-load chat: ${chatError.message}`);
+      }
+      
+      // Small delay before sending
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Attempt to send the message
+      await client.sendMessage(jid, message);
+      console.log(`✅ Message sent successfully to ${jid}`);
+      return { success: true, jid };
+      
+    } catch (error) {
+      lastError = error;
+      console.error(`❌ Attempt ${attempt} failed:`, error.message);
+      
+      // If it's the "Lid is missing" error and we have retries left, continue
+      if (error.message.includes('Lid is missing') && attempt < maxRetries) {
+        console.log(`🔄 Retrying due to chat cache issue...`);
+        continue;
+      }
+      
+      // For other errors or last attempt, throw
+      if (attempt === maxRetries) {
+        throw error;
+      }
+    }
+  }
+  
+  throw lastError;
+}
+
 app.post('/send-message', requireApiKey, async (req, res) => {
   console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: Received /send-message request:`, req.body);
   const { to, body } = req.body;
@@ -794,11 +845,53 @@ app.post('/send-message', requireApiKey, async (req, res) => {
   }
 
   try {
-    // Small delay before sending message
-    await new Promise(resolve => setTimeout(resolve, 500));
-    await client.sendMessage(to, body);
-    console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Message sent to ${to}: ${body}`);
-    res.status(200).json({ status: 'success' });
+    // Check if client is ready before attempting operations
+    const state = await client.getState().catch(() => null);
+    console.log(`📊 ${process.env.BRAND_NAME || 'Server'}: Client state: ${state}`);
+    
+    const isClientReady = state && !['UNPAIRED', 'UNPAIRED_IDLE', 'CONFLICT', 'UNLAUNCHED'].includes(state);
+    if (!isClientReady) {
+      console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Client not ready. State: ${state}`);
+      return res.status(503).json({ 
+        error: 'Client not ready', 
+        details: `Client state is ${state}. Please ensure the client is connected.`,
+        state: state
+      });
+    }
+
+    // Extract phone number from JID (e.g., "23279648205@c.us" -> "23279648205")
+    const phoneNumber = to.split('@')[0];
+    console.log(`🔍 ${process.env.BRAND_NAME || 'Server'}: Validating number ${phoneNumber} on WhatsApp...`);
+    
+    // Validate the number is on WhatsApp and get proper JID
+    let numberId;
+    try {
+      numberId = await client.getNumberId(phoneNumber);
+    } catch (getNumberError) {
+      console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error validating number:`, getNumberError.message);
+      // If validation fails, try using the original 'to' JID as fallback
+      console.warn(`⚠️ ${process.env.BRAND_NAME || 'Server'}: Falling back to original JID: ${to}`);
+      numberId = { _serialized: to };
+    }
+    
+    if (!numberId || !numberId._serialized) {
+      console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Number ${phoneNumber} is not registered on WhatsApp`);
+      return res.status(404).json({ 
+        error: 'Number not on WhatsApp', 
+        details: `The number ${phoneNumber} is not registered on WhatsApp` 
+      });
+    }
+    
+    console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Number validated. Using JID: ${numberId._serialized}`);
+    
+    // Use retry logic to send the message
+    const result = await sendMessageWithRetry(client, numberId._serialized, body, 3);
+    console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Message delivered successfully`);
+    
+    res.status(200).json({ 
+      status: 'success', 
+      to: result.jid 
+    });
   } catch (error) {
     console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error sending message:`, error.message, error.stack);
     return res.status(500).json({ error: 'Failed to send message', details: error.message });
