@@ -109,6 +109,54 @@ async function sendMessageDirectly(client, phoneE164, message) {
   }
 }
 
+/**
+ * Resolve the actual sendable JID from various formats
+ * Handles both LID and regular phone number formats
+ * This is crucial for WhatsApp Business accounts that use LID format
+ */
+async function resolveJID(client, identifier) {
+  try {
+    // If it's already a valid JID format, try to get contact info
+    if (identifier.includes('@')) {
+      console.log(`🔍 Attempting to resolve contact for: ${identifier}`);
+      
+      // Try to get contact information
+      try {
+        const contact = await client.getContactById(identifier);
+        
+        if (contact && contact.id && contact.id._serialized) {
+          console.log(`📞 ${process.env.BRAND_NAME || 'Server'}: Resolved JID from contact: ${contact.id._serialized}`);
+          return contact.id._serialized;
+        }
+        
+        // If contact has a number property, use it to build proper JID
+        if (contact && contact.number) {
+          const jid = `${contact.number}@c.us`;
+          console.log(`📞 ${process.env.BRAND_NAME || 'Server'}: Resolved to phone JID from contact.number: ${jid}`);
+          return jid;
+        }
+      } catch (contactError) {
+        console.warn(`⚠️ ${process.env.BRAND_NAME || 'Server'}: Could not fetch contact for ${identifier}:`, contactError.message);
+        // Continue to fallback
+      }
+      
+      // Fallback: return original identifier
+      console.log(`📞 ${process.env.BRAND_NAME || 'Server'}: Using original JID (no resolution needed): ${identifier}`);
+      return identifier;
+    }
+    
+    // If it's just a number without @, format it properly
+    const cleaned = identifier.replace(/[^\d]/g, '');
+    const formatted = `${cleaned}@c.us`;
+    console.log(`📞 ${process.env.BRAND_NAME || 'Server'}: Formatted plain number to JID: ${formatted}`);
+    return formatted;
+    
+  } catch (error) {
+    console.warn(`⚠️ ${process.env.BRAND_NAME || 'Server'}: Error in resolveJID for ${identifier}:`, error.message);
+    return identifier; // Return original if resolution fails
+  }
+}
+
 // Check network connectivity to web.whatsapp.com
 async function checkNetwork() {
   if (String(process.env.SKIP_NETWORK_CHECK).toLowerCase() === 'true') {
@@ -829,16 +877,20 @@ async function sendMessageWithRetry(client, jid, message, maxRetries = 3) {
 app.post('/send-message', requireApiKey, async (req, res) => {
   console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: Received /send-message request:`, req.body);
   const { to, body } = req.body;
+  
   if (!to || !body) {
     console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Missing required fields in /send-message: ${JSON.stringify({ to, body })}`);
     return res.status(400).json({ error: 'Missing to or body', details: { to, body } });
   }
+  
   if (!to.endsWith('@c.us') && !to.endsWith('@lid')) {
-    console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Invalid recipient for ${to}: must be personal chat (@c.us)`);
-    return res.status(400).json({ error: 'Invalid recipient', details: 'Recipient must be a personal chat (@c.us)' });
+    console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Invalid recipient for ${to}: must be personal chat (@c.us or @lid)`);
+    return res.status(400).json({ error: 'Invalid recipient', details: 'Recipient must be a personal chat (@c.us or @lid)' });
   }
 
-  const client = clients.get(process.env.CLIENT_PHONE_E164);
+  const chatbotId = process.env.CLIENT_PHONE_E164;
+  const client = clients.get(chatbotId);
+  
   if (!client) {
     console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Client not initialized`);
     return res.status(404).json({ error: 'Client not initialized' });
@@ -859,28 +911,35 @@ app.post('/send-message', requireApiKey, async (req, res) => {
       });
     }
 
-    // Extract identifier from JID (e.g., "23279648205@c.us" -> "23279648205" or "165171792240645@lid" -> "165171792240645")
-    const identifier = to.split('@')[0];
-    const jidType = to.split('@')[1]; // 'c.us' or 'lid'
+    // **NEW: Resolve the actual sendable JID**
+    console.log(`🔍 ${process.env.BRAND_NAME || 'Server'}: Resolving JID for: ${to}`);
+    const resolvedJID = await resolveJID(client, to);
+    console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Resolved to JID: ${resolvedJID}`);
+
+    // Determine account type from resolved JID
+    const jidType = resolvedJID.split('@')[1]; // 'c.us' or 'lid'
     const isLidAccount = jidType === 'lid';
     
-    console.log(`🔍 ${process.env.BRAND_NAME || 'Server'}: Processing ${isLidAccount ? 'LID account' : 'regular number'}: ${identifier}@${jidType}`);
+    console.log(`🔍 ${process.env.BRAND_NAME || 'Server'}: Processing ${isLidAccount ? 'LID account' : 'regular number'}: ${resolvedJID}`);
     
-    let numberId;
+    let finalJID = resolvedJID;
     
     // Handle LID accounts differently - they don't follow phone number validation rules
     if (isLidAccount) {
-      console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: LID account detected, using JID directly: ${to}`);
+      console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: LID account detected, using JID directly: ${resolvedJID}`);
       // For LID accounts, use the JID as-is without validation
-      numberId = { _serialized: to };
+      finalJID = resolvedJID;
     } else {
       // For regular phone numbers, validate format before attempting to use it
+      const identifier = resolvedJID.split('@')[0];
+      
       if (!/^\d{6,15}$/.test(identifier)) {
         console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Invalid phone number format: ${identifier} (expected 6-15 digits)`);
         return res.status(400).json({ 
           error: 'Invalid phone number format', 
           details: `Phone number "${identifier}" is invalid. Expected 6-15 digits in international format without + (e.g., 1234567890).`,
           receivedJID: to,
+          resolvedJID: resolvedJID,
           extractedNumber: identifier
         });
       }
@@ -889,32 +948,37 @@ app.post('/send-message', requireApiKey, async (req, res) => {
       
       // Validate the number is on WhatsApp and get proper JID
       try {
-        numberId = await client.getNumberId(identifier);
+        const numberId = await client.getNumberId(identifier);
+        
+        if (!numberId || !numberId._serialized) {
+          console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Number ${identifier} is not registered on WhatsApp`);
+          return res.status(404).json({ 
+            error: 'Number not on WhatsApp', 
+            details: `The number ${identifier} is not registered on WhatsApp` 
+          });
+        }
+        
+        finalJID = numberId._serialized;
+        console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Number validated. Using JID: ${finalJID}`);
       } catch (getNumberError) {
         console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error validating number:`, getNumberError.message);
-        // If validation fails, try using the original 'to' JID as fallback
-        console.warn(`⚠️ ${process.env.BRAND_NAME || 'Server'}: Falling back to original JID: ${to}`);
-        numberId = { _serialized: to };
-      }
-      
-      if (!numberId || !numberId._serialized) {
-        console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Number ${identifier} is not registered on WhatsApp`);
-        return res.status(404).json({ 
-          error: 'Number not on WhatsApp', 
-          details: `The number ${identifier} is not registered on WhatsApp` 
-        });
+        // If validation fails, try using the resolved JID as fallback
+        console.warn(`⚠️ ${process.env.BRAND_NAME || 'Server'}: Falling back to resolved JID: ${resolvedJID}`);
+        finalJID = resolvedJID;
       }
     }
     
-    console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: ${isLidAccount ? 'LID account' : 'Number'} validated. Using JID: ${numberId._serialized}`);
+    console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Final JID for sending: ${finalJID}`);
     
     // Use retry logic to send the message
-    const result = await sendMessageWithRetry(client, numberId._serialized, body, 3);
+    await sendMessageWithRetry(client, finalJID, body, 3);
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Message delivered successfully`);
     
     res.status(200).json({ 
       status: 'success', 
-      to: result.jid 
+      to: finalJID,
+      originalJID: to,
+      accountType: isLidAccount ? 'lid' : 'phone'
     });
   } catch (error) {
     console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error sending message:`, error.message, error.stack);
