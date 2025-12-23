@@ -127,6 +127,7 @@ async function transcribeAudio(media) {
   try {
     const TRANSCRIPTION_API_KEY = process.env.TRANSCRIPTION_API_KEY;
     const TRANSCRIPTION_API_URL = process.env.TRANSCRIPTION_API_URL || 'https://kay.geneline-x.net/api/v1/transcribe_url';
+    const TRANSLATION_API_URL = process.env.TRANSLATION_API_URL
     
     console.log(`🎤 [transcribe] Starting transcription process...`);
     
@@ -182,11 +183,25 @@ async function transcribeAudio(media) {
     
     console.log(`📥 [transcribe] API Response Status: ${response.status}`);
     
+    const res = await axios.post(
+      TRANSLATION_API_URL,
+      { 
+        text: response.data.krio_text,
+        source_lang: "kri",
+        target_lang: "en",
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': TRANSCRIPTION_API_KEY
+        },
+        timeout: 90000 // 90 second timeout
+      }
+    );
+
     // Extract transcription from response - try multiple possible fields
-    const transcription = response.data.english || 
-                         response.data.text || 
-                         response.data.transcription || 
-                         response.data.result;
+    const transcription = res.data.translated_text
+
     
     if (transcription) {
       console.log(`✅ [transcribe] Transcription completed: ${transcription.substring(0, 100)}${transcription.length > 100 ? '...' : ''}`);
