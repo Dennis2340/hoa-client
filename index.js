@@ -8,9 +8,11 @@ const http = require('http');
 const path = require('path');
 require('dotenv').config();
 const axios = require('axios');
-const FormData = require('form-data');
-const fs = require('fs');
-const os = require('os');
+const { UTApi } = require('uploadthing/server');
+
+// Initialize UploadThing API
+const UPLOADTHING_TOKEN = process.env.UPLOADTHING_TOKEN;
+const utapi = UPLOADTHING_TOKEN ? new UTApi({ token: UPLOADTHING_TOKEN }) : null;
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -117,84 +119,124 @@ async function sendMessageDirectly(client, phoneE164, message) {
  * @param {Object} media - Media object from whatsapp-web.js with base64 data
  * @returns {Promise<string|null>} - Transcription text or null on error
  */
+/**
+ * Upload audio to UploadThing and transcribe using URL-based API
+ * This avoids filesystem issues on serverless platforms like Render
+ */
 async function transcribeAudio(media) {
-  let tempFilePath = null;
-  
   try {
     const TRANSCRIPTION_API_KEY = process.env.TRANSCRIPTION_API_KEY;
-    const TRANSCRIPTION_API_URL = process.env.TRANSCRIPTION_API_URL || 'https://kay.geneline-x.net/api/v1/transcribe';
+    const TRANSCRIPTION_API_URL = process.env.TRANSCRIPTION_API_URL || 'https://kay.geneline-x.net/api/v1/transcribe_url';
+    
+    console.log(`🎤 [transcribe] Starting transcription process...`);
     
     if (!TRANSCRIPTION_API_KEY) {
-      console.error('❌ TRANSCRIPTION_API_KEY not configured in environment variables');
+      console.error('❌ [transcribe] TRANSCRIPTION_API_KEY not configured');
       return null;
     }
     
-    // Create a temporary directory if it doesn't exist
-    const tempDir = path.join(os.tmpdir(), 'whatsapp-transcriptions');
-    if (!fs.existsSync(tempDir)) {
-      fs.mkdirSync(tempDir, { recursive: true });
+    if (!utapi || !UPLOADTHING_TOKEN) {
+      console.error('❌ [transcribe] UPLOADTHING_TOKEN not configured');
+      return null;
     }
     
-    // Create temporary file with appropriate extension
-    const fileName = `audio_${Date.now()}.ogg`;
-    tempFilePath = path.join(tempDir, fileName);
-    
-    // Write media to file
+    // Convert base64 to buffer
     const buffer = Buffer.from(media.data, 'base64');
-    fs.writeFileSync(tempFilePath, buffer);
+    console.log(`📦 [transcribe] Audio buffer size: ${buffer.length} bytes`);
     
-    console.log(`📝 Transcribing audio file: ${fileName} (${buffer.length} bytes)`);
+    // Determine file extension from mimetype
+    const extension = getFileExtension(media.mimetype);
+    const fileName = `whatsapp-audio-${Date.now()}.${extension}`;
     
-    // Create form data
-    const formData = new FormData();
-    formData.append('file', fs.createReadStream(tempFilePath));
-    
-    // Send to transcription API
-    const response = await axios.post(TRANSCRIPTION_API_URL, formData, {
-      headers: {
-        'X-API-Key': TRANSCRIPTION_API_KEY,
-        ...formData.getHeaders()
-      },
-      timeout: 60000 // 60 second timeout
+    // Create a File object from buffer
+    const file = new File([buffer], fileName, { 
+      type: media.mimetype || 'audio/ogg' 
     });
     
-    // Clean up temp file
-    if (fs.existsSync(tempFilePath)) {
-      fs.unlinkSync(tempFilePath);
-      tempFilePath = null;
+    console.log(`⬆️ [transcribe] Uploading to UploadThing: ${fileName}`);
+    
+    // Upload to UploadThing
+    const uploadResult = await utapi.uploadFiles([file]);
+    
+    if (!uploadResult[0] || uploadResult[0].error) {
+      console.error('❌ [transcribe] Upload failed:', uploadResult[0]?.error);
+      return null;
     }
     
-    // Extract transcription from response
-    const transcription = response.data.english
+    const audioUrl = uploadResult[0].data.ufsUrl;
+    console.log(`✅ [transcribe] Upload successful: ${audioUrl}`);
+    
+    // Transcribe using the URL
+    console.log(`🎯 [transcribe] Sending to transcription API...`);
+    const response = await axios.post(
+      TRANSCRIPTION_API_URL,
+      { url: audioUrl },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-API-Key': TRANSCRIPTION_API_KEY
+        },
+        timeout: 90000 // 90 second timeout
+      }
+    );
+    
+    console.log(`📥 [transcribe] API Response Status: ${response.status}`);
+    
+    // Extract transcription from response - try multiple possible fields
+    const transcription = response.data.english || 
+                         response.data.text || 
+                         response.data.transcription || 
+                         response.data.result;
     
     if (transcription) {
-      console.log(`✅ Transcription completed: ${transcription.substring(0, 100)}${transcription.length > 100 ? '...' : ''}`);
+      console.log(`✅ [transcribe] Transcription completed: ${transcription.substring(0, 100)}${transcription.length > 100 ? '...' : ''}`);
     } else {
-      console.warn('⚠️ Transcription API returned no text. Response:', JSON.stringify(response.data));
+      console.warn('⚠️ [transcribe] No transcription text found in response');
+      console.warn('⚠️ [transcribe] Full response:', JSON.stringify(response.data));
+    }
+    
+    // Optional: Delete file from UploadThing after transcription to save space
+    try {
+      await utapi.deleteFiles([uploadResult[0].data.key]);
+      console.log(`🗑️ [transcribe] Deleted temporary file from UploadThing`);
+    } catch (deleteError) {
+      console.warn('⚠️ [transcribe] Failed to delete file from UploadThing:', deleteError.message);
+      // Non-critical error, continue anyway
     }
     
     return transcription;
     
   } catch (error) {
-    console.error('❌ Transcription error:', error.message);
+    console.error('❌ [transcribe] Error:', error.message);
     
     // Log more details for debugging
     if (error.response) {
-      console.error('API Response Status:', error.response.status);
-      console.error('API Response Data:', JSON.stringify(error.response.data));
-    }
-    
-    // Clean up temp file if it exists
-    if (tempFilePath && fs.existsSync(tempFilePath)) {
-      try {
-        fs.unlinkSync(tempFilePath);
-      } catch (cleanupError) {
-        console.error('Error cleaning up temp file:', cleanupError.message);
-      }
+      console.error('❌ [transcribe] API Response Status:', error.response.status);
+      console.error('❌ [transcribe] API Response Data:', JSON.stringify(error.response.data));
+    } else if (error.request) {
+      console.error('❌ [transcribe] No response received from API');
+    } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+      console.error('❌ [transcribe] Request timeout - API took too long');
     }
     
     return null;
   }
+}
+
+/**
+ * Helper function to get file extension from mimetype
+ */
+function getFileExtension(mimetype) {
+  const mimeMap = {
+    'audio/ogg': 'ogg',
+    'audio/ogg; codecs=opus': 'ogg',
+    'audio/mpeg': 'mp3',
+    'audio/mp4': 'm4a',
+    'audio/wav': 'wav',
+    'audio/webm': 'webm'
+  };
+  
+  return mimeMap[mimetype] || 'ogg';
 }
 
 /**
@@ -512,15 +554,25 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
               message.body = transcription;
             } else {
               console.log(`❌ [message] Transcription failed for ${message.from}`);
+              // Send try again message if transcription fails
+              try {
+                await client.sendMessage(message.from, 'Sorry, I couldn\'t transcribe your voice note. Please try again or send a text message.');
+              } catch (sendError) {
+                console.error('Error sending transcription failure message:', sendError.message);
+              }
+              // Return early to prevent webhook processing
+              return;
             }
           }
         } catch (transcriptionError) {
           console.error(`❌ [message] Voice note transcription error:`, transcriptionError.message);
           try {
-            await client.sendMessage(message.from, '❌ An error occurred while processing your voice note.');
+            await client.sendMessage(message.from, 'An error occurred while processing your voice note. Please try again.');
           } catch (sendError) {
             console.error('Error sending error message:', sendError.message);
           }
+          // Return early to prevent webhook processing
+          return;
         }
       }
 
