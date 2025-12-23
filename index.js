@@ -8,6 +8,9 @@ const http = require('http');
 const path = require('path');
 require('dotenv').config();
 const axios = require('axios');
+const FormData = require('form-data');
+const fs = require('fs');
+const os = require('os');
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -106,6 +109,91 @@ async function sendMessageDirectly(client, phoneE164, message) {
     return { success: true, jid: wid._serialized };
   } catch (error) {
     return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Transcribe audio from WhatsApp voice notes
+ * @param {Object} media - Media object from whatsapp-web.js with base64 data
+ * @returns {Promise<string|null>} - Transcription text or null on error
+ */
+async function transcribeAudio(media) {
+  let tempFilePath = null;
+  
+  try {
+    const TRANSCRIPTION_API_KEY = process.env.TRANSCRIPTION_API_KEY;
+    const TRANSCRIPTION_API_URL = process.env.TRANSCRIPTION_API_URL || 'https://kay.geneline-x.net/api/v1/transcribe';
+    
+    if (!TRANSCRIPTION_API_KEY) {
+      console.error('❌ TRANSCRIPTION_API_KEY not configured in environment variables');
+      return null;
+    }
+    
+    // Create a temporary directory if it doesn't exist
+    const tempDir = path.join(os.tmpdir(), 'whatsapp-transcriptions');
+    if (!fs.existsSync(tempDir)) {
+      fs.mkdirSync(tempDir, { recursive: true });
+    }
+    
+    // Create temporary file with appropriate extension
+    const fileName = `audio_${Date.now()}.ogg`;
+    tempFilePath = path.join(tempDir, fileName);
+    
+    // Write media to file
+    const buffer = Buffer.from(media.data, 'base64');
+    fs.writeFileSync(tempFilePath, buffer);
+    
+    console.log(`📝 Transcribing audio file: ${fileName} (${buffer.length} bytes)`);
+    
+    // Create form data
+    const formData = new FormData();
+    formData.append('file', fs.createReadStream(tempFilePath));
+    
+    // Send to transcription API
+    const response = await axios.post(TRANSCRIPTION_API_URL, formData, {
+      headers: {
+        'X-API-Key': TRANSCRIPTION_API_KEY,
+        ...formData.getHeaders()
+      },
+      timeout: 60000 // 60 second timeout
+    });
+    
+    // Clean up temp file
+    if (fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+      tempFilePath = null;
+    }
+    
+    // Extract transcription from response
+    const transcription = response.data.english
+    
+    if (transcription) {
+      console.log(`✅ Transcription completed: ${transcription.substring(0, 100)}${transcription.length > 100 ? '...' : ''}`);
+    } else {
+      console.warn('⚠️ Transcription API returned no text. Response:', JSON.stringify(response.data));
+    }
+    
+    return transcription;
+    
+  } catch (error) {
+    console.error('❌ Transcription error:', error.message);
+    
+    // Log more details for debugging
+    if (error.response) {
+      console.error('API Response Status:', error.response.status);
+      console.error('API Response Data:', JSON.stringify(error.response.data));
+    }
+    
+    // Clean up temp file if it exists
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      try {
+        fs.unlinkSync(tempFilePath);
+      } catch (cleanupError) {
+        console.error('Error cleaning up temp file:', cleanupError.message);
+      }
+    }
+    
+    return null;
   }
 }
 
@@ -403,6 +491,36 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         } catch (mediaError) {
           console.error(`[message] Error downloading media:`, mediaError.message);
           // Continue processing without media data
+        }
+      }
+
+      // Handle voice note transcription
+      if (message.hasMedia && (msgType === 'ptt' || msgType === 'audio')) {
+        try {
+          console.log(`🎤 [message] Voice note detected from ${message.from}`);
+          
+          // Download and transcribe
+          const media = await message.downloadMedia();
+          
+          if (media) {
+            const transcription = await transcribeAudio(media);
+            
+            if (transcription) {
+              console.log(`✅ [message] Transcription sent to ${message.from}`);
+              
+              // Update message body with transcription for webhook processing
+              message.body = transcription;
+            } else {
+              console.log(`❌ [message] Transcription failed for ${message.from}`);
+            }
+          }
+        } catch (transcriptionError) {
+          console.error(`❌ [message] Voice note transcription error:`, transcriptionError.message);
+          try {
+            await client.sendMessage(message.from, '❌ An error occurred while processing your voice note.');
+          } catch (sendError) {
+            console.error('Error sending error message:', sendError.message);
+          }
         }
       }
 
