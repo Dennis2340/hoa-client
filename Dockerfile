@@ -1,5 +1,5 @@
-# Use Debian-based image for maximum Puppeteer/Chromium compatibility
-FROM node:18-bullseye-slim
+# Use official Bun image which includes Node.js compatibility
+FROM oven/bun:1-debian AS base
 
 # Set working directory
 WORKDIR /usr/src/app
@@ -24,9 +24,9 @@ RUN apt-get update && \
       curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy package files and install dependencies
-COPY package*.json ./
-RUN npm ci --only=production && npm cache clean --force
+# Copy package files and install dependencies with Bun
+COPY package.json bun.lock* ./
+RUN bun install --production --frozen-lockfile
 
 # Copy application code
 COPY . .
@@ -56,7 +56,7 @@ ENV CHROME_BIN=/usr/bin/chromium \
     CHROME_PATH=/usr/bin/chromium \
     PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
-    NODE_OPTIONS="--max-old-space-size=1024"
+    BUN_INSTALL_CACHE_DIR=/tmp/.bun-cache
 
-# Start the application
-CMD ["node", "--expose-gc", "index.js"]
+# Start the application with Bun
+CMD ["bun", "run", "index.js"]
