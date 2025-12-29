@@ -126,7 +126,7 @@ async function sendMessageDirectly(client, phoneE164, message) {
 async function transcribeAudio(media) {
   try {
     const TRANSCRIPTION_API_KEY = process.env.TRANSCRIPTION_API_KEY;
-    const TRANSCRIPTION_API_URL = process.env.TRANSCRIPTION_API_URL || 'https://kay.geneline-x.net/api/v1/transcribe_url';
+    const TRANSCRIPTION_API_URL = process.env.TRANSCRIPTION_API_URL;
     const TRANSLATION_API_URL = process.env.TRANSLATION_API_URL
     
     console.log(`🎤 [transcribe] Starting transcription process...`);
