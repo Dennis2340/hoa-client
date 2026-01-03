@@ -20,7 +20,7 @@ services:
         value: AIDeX
       - key: BRAND_TAGLINE
         value: WhatsApp AI Assistant
-      - key: NEXT_PUBLIC_ABSOLUTE_URL
+      - key: AGENT_URL
         sync: false
       - key: API_KEY
         generateValue: true
