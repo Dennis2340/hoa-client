@@ -8,11 +8,6 @@ const http = require('http');
 const path = require('path');
 require('dotenv').config();
 const axios = require('axios');
-const { UTApi } = require('uploadthing/server');
-
-// Initialize UploadThing API
-const UPLOADTHING_TOKEN = process.env.UPLOADTHING_TOKEN;
-const utapi = UPLOADTHING_TOKEN ? new UTApi({ token: UPLOADTHING_TOKEN }) : null;
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('Unhandled Rejection at:', promise, 'reason:', reason);
@@ -45,7 +40,6 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    // origin: process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3001' || "https://rag-x.dev/",
     origin: "*",
     methods: ['GET', 'POST'],
     credentials: true,
@@ -54,7 +48,6 @@ const io = new Server(server, {
 });
 
 app.use(cors({
-  // origin: process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3001' || "https://rag-x.dev/",
   origin: "*",
   methods: ['GET', 'POST'],
   credentials: true,
@@ -86,13 +79,10 @@ const requireApiKey = (req, res, next) => {
 
 const qrCodes = new Map();
 const clients = new Map();
-const messagesLog = [];
-const MAX_LOG = 200;
 
 // Session monitoring
 const sessionHealthChecks = new Map();
-const HEALTH_CHECK_INTERVAL = 30000; // 30 secondsAdd
-const SESSION_TIMEOUT = 300000; // 5 minutes without activity before considering unhealthy
+const HEALTH_CHECK_INTERVAL = 30000; // 30 seconds
 
 // Message queue helper functions
 async function sendMessageDirectly(client, phoneE164, message) {
@@ -114,145 +104,7 @@ async function sendMessageDirectly(client, phoneE164, message) {
   }
 }
 
-/**
- * Transcribe audio from WhatsApp voice notes
- * @param {Object} media - Media object from whatsapp-web.js with base64 data
- * @returns {Promise<string|null>} - Transcription text or null on error
- */
-/**
- * Upload audio to UploadThing and transcribe using URL-based API
- * This avoids filesystem issues on serverless platforms like Render
- */
-async function transcribeAudio(media) {
-  try {
-    const TRANSCRIPTION_API_KEY = process.env.TRANSCRIPTION_API_KEY;
-    const TRANSCRIPTION_API_URL = process.env.TRANSCRIPTION_API_URL;
-    const TRANSLATION_API_URL = process.env.TRANSLATION_API_URL
-    
-    console.log(`🎤 [transcribe] Starting transcription process...`);
-    
-    if (!TRANSCRIPTION_API_KEY) {
-      console.error('❌ [transcribe] TRANSCRIPTION_API_KEY not configured');
-      return null;
-    }
-    
-    if (!utapi || !UPLOADTHING_TOKEN) {
-      console.error('❌ [transcribe] UPLOADTHING_TOKEN not configured');
-      return null;
-    }
-    
-    // Convert base64 to buffer
-    const buffer = Buffer.from(media.data, 'base64');
-    console.log(`📦 [transcribe] Audio buffer size: ${buffer.length} bytes`);
-    
-    // Determine file extension from mimetype
-    const extension = getFileExtension(media.mimetype);
-    const fileName = `whatsapp-audio-${Date.now()}.${extension}`;
-    
-    // Create a File object from buffer
-    const file = new File([buffer], fileName, { 
-      type: media.mimetype || 'audio/ogg' 
-    });
-    
-    console.log(`⬆️ [transcribe] Uploading to UploadThing: ${fileName}`);
-    
-    // Upload to UploadThing
-    const uploadResult = await utapi.uploadFiles([file]);
-    
-    if (!uploadResult[0] || uploadResult[0].error) {
-      console.error('❌ [transcribe] Upload failed:', uploadResult[0]?.error);
-      return null;
-    }
-    
-    const audioUrl = uploadResult[0].data.ufsUrl;
-    console.log(`✅ [transcribe] Upload successful: ${audioUrl}`);
-    
-    // Transcribe using the URL
-    console.log(`🎯 [transcribe] Sending to transcription API...`);
-    const response = await axios.post(
-      TRANSCRIPTION_API_URL,
-      { url: audioUrl },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': TRANSCRIPTION_API_KEY
-        },
-        timeout: 90000 // 90 second timeout
-      }
-    );
-    
-    console.log(`📥 [transcribe] API Response Status: ${response.status}`);
-    
-    const res = await axios.post(
-      TRANSLATION_API_URL,
-      { 
-        text: response.data.krio_text,
-        source_lang: "kri",
-        target_lang: "en",
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-API-Key': TRANSCRIPTION_API_KEY
-        },
-        timeout: 90000 // 90 second timeout
-      }
-    );
 
-    // Extract transcription from response - try multiple possible fields
-    const transcription = res.data.translated_text
-
-    
-    if (transcription) {
-      console.log(`✅ [transcribe] Transcription completed: ${transcription.substring(0, 100)}${transcription.length > 100 ? '...' : ''}`);
-    } else {
-      console.warn('⚠️ [transcribe] No transcription text found in response');
-      console.warn('⚠️ [transcribe] Full response:', JSON.stringify(response.data));
-    }
-    
-    // Optional: Delete file from UploadThing after transcription to save space
-    try {
-      await utapi.deleteFiles([uploadResult[0].data.key]);
-      console.log(`🗑️ [transcribe] Deleted temporary file from UploadThing`);
-    } catch (deleteError) {
-      console.warn('⚠️ [transcribe] Failed to delete file from UploadThing:', deleteError.message);
-      // Non-critical error, continue anyway
-    }
-    
-    return transcription;
-    
-  } catch (error) {
-    console.error('❌ [transcribe] Error:', error.message);
-    
-    // Log more details for debugging
-    if (error.response) {
-      console.error('❌ [transcribe] API Response Status:', error.response.status);
-      console.error('❌ [transcribe] API Response Data:', JSON.stringify(error.response.data));
-    } else if (error.request) {
-      console.error('❌ [transcribe] No response received from API');
-    } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
-      console.error('❌ [transcribe] Request timeout - API took too long');
-    }
-    
-    return null;
-  }
-}
-
-/**
- * Helper function to get file extension from mimetype
- */
-function getFileExtension(mimetype) {
-  const mimeMap = {
-    'audio/ogg': 'ogg',
-    'audio/ogg; codecs=opus': 'ogg',
-    'audio/mpeg': 'mp3',
-    'audio/mp4': 'm4a',
-    'audio/wav': 'wav',
-    'audio/webm': 'webm'
-  };
-  
-  return mimeMap[mimetype] || 'ogg';
-}
 
 /**
  * Resolve the actual sendable JID from various formats
@@ -474,7 +326,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     startHealthMonitoring(chatbotId, client);
     
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
+      await fetch(`${process.env.AGENT_URL}`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -551,71 +403,6 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         }
       }
 
-      // Handle voice note transcription
-      if (message.hasMedia && (msgType === 'ptt' || msgType === 'audio')) {
-        try {
-          console.log(`🎤 [message] Voice note detected from ${message.from}`);
-          
-          // Download and transcribe
-          const media = await message.downloadMedia();
-          
-          if (media) {
-            const transcription = await transcribeAudio(media);
-            
-            if (transcription) {
-              console.log(`✅ [message] Transcription sent to ${message.from}`);
-              
-              // Update message body with transcription for webhook processing
-              message.body = transcription;
-            } else {
-              console.log(`❌ [message] Transcription failed for ${message.from}`);
-              // Send try again message if transcription fails
-              try {
-                await client.sendMessage(message.from, 'Sorry, I couldn\'t transcribe your voice note. Please try again or send a text message.');
-              } catch (sendError) {
-                console.error('Error sending transcription failure message:', sendError.message);
-              }
-              // Return early to prevent webhook processing
-              return;
-            }
-          }
-        } catch (transcriptionError) {
-          console.error(`❌ [message] Voice note transcription error:`, transcriptionError.message);
-          try {
-            await client.sendMessage(message.from, 'An error occurred while processing your voice note. Please try again.');
-          } catch (sendError) {
-            console.error('Error sending error message:', sendError.message);
-          }
-          // Return early to prevent webhook processing
-          return;
-        }
-      }
-
-      // Log incoming
-      try {
-        messagesLog.push({
-          ts: new Date().toISOString(),
-          from: message.from,
-          to: message.to,
-          body: message.body,
-          id: message.id?.id || null,
-          type: 'incoming',
-          messageType: msgType,
-          hasMedia: message.hasMedia || false,
-          ...(mediaData && { 
-            mediaType: mediaData.mimetype,
-            mediaSize: mediaData.size,
-            mediaFilename: mediaData.filename
-          }),
-          ...(message.location && {
-            hasLocation: true,
-            latitude: message.location.latitude,
-            longitude: message.location.longitude
-          })
-        });
-        if (messagesLog.length > MAX_LOG) messagesLog.shift();
-      } catch {}
-
       // Derive phoneE164 from JID if possible (e.g., "1234567890@c.us" -> "+1234567890")
       const jidLocal = (message.from || '').split('@')[0] || '';
       const phoneE164 = /^\d{6,15}$/.test(jidLocal) ? `+${jidLocal}` : undefined;
@@ -648,7 +435,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
       console.log(`[message] Webhook payload prepared: hasMedia=${webhookPayload.hasMedia}, messageType=${webhookPayload.messageType}${mediaData ? `, mediaType=${mediaData.mimetype}` : ''}${locationData ? `, hasLocation=true` : ''}`);
 
       // Call Next.js API for incoming message processing using env base URL
-      const apiBase = (process.env.NEXT_PUBLIC_ABSOLUTE_URL || 'http://localhost:3001').replace(/\/+$/, '');
+      const apiBase = (process.env.AGENT_URL || 'http://localhost:3001').replace(/\/+$/, '');
       const response = await fetch(`${apiBase}`, {
         method: 'POST',
         headers: { 
@@ -706,17 +493,6 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         try {
           await client.sendMessage(message.from, text);
           console.log(`[message] Reply sent to ${message.from}: ${text}`);
-          try {
-            messagesLog.push({
-              ts: new Date().toISOString(),
-              from: 'bot',
-              to: message.from,
-              body: text,
-              id: null,
-              type: 'outgoing',
-            });
-            if (messagesLog.length > MAX_LOG) messagesLog.shift();
-          } catch {}
         } catch (error) {
           console.error('[message] Error sending reply:', error.message, error.stack);
           try {
@@ -733,17 +509,6 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
         await new Promise(resolve => setTimeout(resolve, 500));
         await client.sendMessage(message.from, 'Sorry, I couldn\'t generate a response.');
         console.log('[message] Sent fallback message due to empty response');
-        try {
-          messagesLog.push({
-            ts: new Date().toISOString(),
-            from: 'bot',
-            to: message.from,
-            body: "Sorry, I couldn't generate a response.",
-            id: null,
-            type: 'outgoing',
-          });
-          if (messagesLog.length > MAX_LOG) messagesLog.shift();
-        } catch {}
       }
     } catch (error) {
       console.error('[message] Error processing incoming message:', error.message, error.stack);
@@ -775,7 +540,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     
     // Notify webhook about disconnection
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
+      await fetch(`${process.env.AGENT_URL}`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -995,18 +760,6 @@ app.get('/health', requireApiKey, async (req, res) => {
 app.get('/healthz', (req, res) => {
   res.status(200).send('ok');
 });
-
-// Expose logs endpoint for quick verification
-app.get('/logs/messages', requireApiKey, (req, res) => {
-  try {
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, MAX_LOG);
-    const slice = messagesLog.slice(-limit);
-    res.status(200).json({ count: slice.length, total: messagesLog.length, items: slice });
-  } catch (e) {
-    res.status(200).json({ count: messagesLog.length, total: messagesLog.length, items: messagesLog });
-  }
-});
-
 
 // Helper function to send message with retry logic
 async function sendMessageWithRetry(client, jid, message, maxRetries = 3) {
@@ -1297,21 +1050,6 @@ app.post('/send-media', requireApiKey, async (req, res) => {
   }
 });
 
-app.post('/webhook-path', requireApiKey, async (req, res) => {
-  console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: Received /webhook-path request:`, req.body);
-  const { event, phoneNumber } = req.body;
-  if (event === 'connected') {
-    console.log(`Webhook: Client connected, phone: ${phoneNumber}`);
-    return res.status(200).json({ status: 'success' });
-  }
-  if (event === 'disconnected') {
-    console.log('Webhook: Client disconnected');
-    return res.status(200).json({ status: 'success' });
-  }
-  console.log('Webhook received but not processed:', req.body);
-  return res.status(200).json({ status: 'success' });
-});
-
 app.post('/logout', requireApiKey, async (req, res) => {
   console.log(`🔓 ${process.env.BRAND_NAME || 'Server'}: Received /logout request`);
   const chatbotId = process.env.CLIENT_PHONE_E164;
@@ -1345,7 +1083,7 @@ app.post('/logout', requireApiKey, async (req, res) => {
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Client removed from memory`);
     
     try {
-      await fetch(`${process.env.NEXT_PUBLIC_ABSOLUTE_URL}`, {
+      await fetch(`${process.env.AGENT_URL}`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
