@@ -1115,14 +1115,12 @@ server.listen(PORT, () => {
   console.log(`🚀 ${brandName} Server is running on port ${PORT}`);
   console.log(`🔗 Connect UI: http://localhost:${PORT}/connect/${process.env.CLIENT_PHONE_E164}`);
   console.log(`🔗 Brand API: http://localhost:${PORT}/api/brand`);
-  console.log(`🔗 Webhook endpoint: http://localhost:${PORT}/webhook-path`);
   console.log(`🔗 Send message endpoint: http://localhost:${PORT}/send-message`);
   console.log(`🔗 Send media endpoint: http://localhost:${PORT}/send-media`);
   console.log(`🔗 QR code endpoint: http://localhost:${PORT}/qr`);
   console.log(`🔗 Status endpoint: http://localhost:${PORT}/status`);
   console.log(`🔗 Health endpoint: http://localhost:${PORT}/health`);
   console.log(`🔗 Logout endpoint: http://localhost:${PORT}/logout`);
-  console.log(`🔗 Socket.IO endpoint: http://localhost:${PORT}/socket.io`);
   console.log(`🔒 API Key authentication: ${process.env.API_KEY ? 'ENABLED' : 'DISABLED'}`);
   console.log(`🏷️ Brand: ${brandName} - ${process.env.BRAND_TAGLINE || 'AI Assistant'}`);
 });
