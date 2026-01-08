@@ -926,7 +926,7 @@ app.post('/send-message', requireApiKey, async (req, res) => {
 });
 
 // Send WhatsApp message using E.164 phone number
-app.post('/send-whatsapp', requireApiKey, async (req, res) => {
+app.post('/send-whatsapp', async (req, res) => {
   console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: Received /send-whatsapp request:`, req.body);
   const { phoneE164, message } = req.body || {};
   
