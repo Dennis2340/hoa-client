@@ -97,11 +97,40 @@ async function sendMessageDirectly(client, phoneE164, message) {
 
     // Small delay before sending
     await new Promise(resolve => setTimeout(resolve, 300));
-    await client.sendMessage(wid._serialized, message);
+    await client.sendMessage(wid._serialized, message, { sendSeen: false });
     
     return { success: true, jid: wid._serialized };
   } catch (error) {
     return { success: false, error: error.message };
+  }
+}
+
+async function ensureChatLoaded(client, jid) {
+  try {
+    return await client.getChatById(jid);
+  } catch (error) {
+    return null;
+  }
+}
+
+async function safeSendMessage(client, to, text) {
+  const resolvedTo = await resolveJID(client, to);
+  await ensureChatLoaded(client, resolvedTo);
+
+  try {
+    await client.sendMessage(resolvedTo, text, { sendSeen: false });
+    return { success: true, to: resolvedTo };
+  } catch (error) {
+    const msg = String(error?.message || '');
+
+    if (msg.includes('markedUnread') || msg.includes('sendSeen')) {
+      await new Promise(resolve => setTimeout(resolve, 800));
+      await ensureChatLoaded(client, resolvedTo);
+      await client.sendMessage(resolvedTo, text, { sendSeen: false });
+      return { success: true, to: resolvedTo, retried: true };
+    }
+
+    throw error;
   }
 }
 
@@ -492,30 +521,37 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
 
       if (text.trim()) {
         try {
-          await client.sendMessage(message.from, text);
-          console.log(`[message] Reply sent to ${message.from}: ${text}`);
+          const sendResult = await safeSendMessage(client, message.from, text);
+          console.log(`[message] Reply sent to ${sendResult.to}: ${text}`);
         } catch (error) {
           console.error('[message] Error sending reply:', error.message, error.stack);
           try {
             await client.sendPresenceAvailable();
-            await client.simulateTyping(message.from, true);
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            await client.simulateTyping(message.from, false);
-            await client.sendMessage(message.from, 'Sorry, there was an error processing your request.');
+
+            const chat = await ensureChatLoaded(client, message.from);
+            if (chat && typeof chat.sendStateTyping === 'function') {
+              await chat.sendStateTyping();
+              await new Promise(resolve => setTimeout(resolve, 1000));
+              if (typeof chat.clearState === 'function') {
+                await chat.clearState();
+              }
+            }
+
+            await safeSendMessage(client, message.from, 'Sorry, there was an error processing your request.');
           } catch (sendError) {
             console.error('Error sending error message:', sendError.message, sendError.stack);
           }
         }
       } else {
         await new Promise(resolve => setTimeout(resolve, 500));
-        await client.sendMessage(message.from, 'Sorry, I couldn\'t generate a response.');
+        await safeSendMessage(client, message.from, 'Sorry, I couldn\'t generate a response.');
         console.log('[message] Sent fallback message due to empty response');
       }
     } catch (error) {
       console.error('[message] Error processing incoming message:', error.message, error.stack);
       try {
         await new Promise(resolve => setTimeout(resolve, 500));
-        await client.sendMessage(message.from, 'Sorry, there was an error processing your request.');
+        await safeSendMessage(client, message.from, 'Sorry, there was an error processing your request.');
       } catch (sendError) {
         console.error('Error sending error message:', sendError.message, sendError.stack);
       }
@@ -789,7 +825,7 @@ async function sendMessageWithRetry(client, jid, message, maxRetries = 3) {
       await new Promise(resolve => setTimeout(resolve, 500));
       
       // Attempt to send the message
-      await client.sendMessage(jid, message);
+      await client.sendMessage(jid, message, { sendSeen: false });
       console.log(`✅ Message sent successfully to ${jid}`);
       return { success: true, jid };
       
