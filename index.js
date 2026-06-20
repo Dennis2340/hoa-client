@@ -1,6 +1,6 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const { Client, LocalAuth, RemoteAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const { Server } = require('socket.io');
 const cors = require('cors');
@@ -8,6 +8,105 @@ const http = require('http');
 const path = require('path');
 require('dotenv').config();
 const axios = require('axios');
+const fs = require('fs');
+const mongoose = require('mongoose');
+
+// Custom MongoDB (GridFS) session store compatible with whatsapp-web.js >= 1.34
+// RemoteAuth. The published `wwebjs-mongo` reads the session zip from the current
+// working directory, but newer RemoteAuth writes/reads it under its dataPath
+// (./.wwebjs_auth). This mismatch produced 0-byte session backups. This store
+// reads the zip from the correct location so sessions actually persist.
+const SESSION_DATA_PATH = path.resolve('./.wwebjs_auth/');
+class MongoSessionStore {
+  constructor({ mongoose: mongooseInstance } = {}) {
+    if (!mongooseInstance) throw new Error('A valid Mongoose instance is required for MongoSessionStore.');
+    this.mongoose = mongooseInstance;
+  }
+
+  _bucket(session) {
+    return new this.mongoose.mongo.GridFSBucket(this.mongoose.connection.db, {
+      bucketName: `whatsapp-${session}`,
+    });
+  }
+
+  _zipPath(session) {
+    return path.join(SESSION_DATA_PATH, `${session}.zip`);
+  }
+
+  async sessionExists(options) {
+    const coll = this.mongoose.connection.db.collection(`whatsapp-${options.session}.files`);
+    const count = await coll.countDocuments();
+    return !!count;
+  }
+
+  async save(options) {
+    const bucket = this._bucket(options.session);
+    const zipPath = this._zipPath(options.session);
+    await new Promise((resolve, reject) => {
+      fs.createReadStream(zipPath)
+        .on('error', reject)
+        .pipe(bucket.openUploadStream(`${options.session}.zip`))
+        .on('error', reject)
+        .on('close', resolve);
+    });
+    // Keep only the most recent backup.
+    const docs = await bucket.find({ filename: `${options.session}.zip` }).toArray();
+    if (docs.length > 1) {
+      docs.sort((a, b) => b.uploadDate - a.uploadDate);
+      for (const doc of docs.slice(1)) {
+        await bucket.delete(doc._id);
+      }
+    }
+  }
+
+  async extract(options) {
+    const bucket = this._bucket(options.session);
+    // RemoteAuth may target a path inside ./.wwebjs_auth which does not yet exist
+    // on a fresh host (e.g. ephemeral filesystem after a redeploy). Create it.
+    await fs.promises.mkdir(path.dirname(options.path), { recursive: true });
+    await new Promise((resolve, reject) => {
+      bucket.openDownloadStreamByName(`${options.session}.zip`)
+        .on('error', reject)
+        .pipe(fs.createWriteStream(options.path))
+        .on('error', reject)
+        .on('close', resolve);
+    });
+  }
+
+  async delete(options) {
+    const bucket = this._bucket(options.session);
+    const docs = await bucket.find({ filename: `${options.session}.zip` }).toArray();
+    for (const doc of docs) {
+      await bucket.delete(doc._id);
+    }
+  }
+}
+
+// Persistent session store (MongoDB) - shared across the process so the
+// WhatsApp session survives server restarts and redeploys.
+let sessionStore = null;
+async function getSessionStore() {
+  if (sessionStore) return sessionStore;
+
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    throw new Error('MONGODB_URI is not set in .env (required for persistent WhatsApp session storage)');
+  }
+
+  if (mongoose.connection.readyState !== 1) {
+    console.log(`🗄️ ${process.env.BRAND_NAME || 'Server'}: Connecting to MongoDB for session storage...`);
+    await mongoose.connect(uri, { serverSelectionTimeoutMS: 30000 });
+    console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: MongoDB connected for session storage`);
+  }
+
+  sessionStore = new MongoSessionStore({ mongoose });
+  return sessionStore;
+}
+
+// Stable, filesystem-safe session id derived from the phone number.
+function getSessionId(chatbotId) {
+  return String(chatbotId).replace(/[^A-Za-z0-9_-]/g, '_');
+}
 
 
 process.on('unhandledRejection', (reason, promise) => {
@@ -33,7 +132,16 @@ async function gracefulShutdown() {
   for (const [chatbotId] of sessionHealthChecks) {
     stopHealthMonitoring(chatbotId);
   }
-  
+
+  try {
+    if (mongoose.connection.readyState === 1) {
+      await mongoose.disconnect();
+      console.log('MongoDB connection closed');
+    }
+  } catch (error) {
+    console.error('Error closing MongoDB connection:', error.message);
+  }
+
   console.log('Shutdown complete');
 }
 
@@ -80,6 +188,9 @@ const requireApiKey = (req, res, next) => {
 
 const qrCodes = new Map();
 const clients = new Map();
+// Tracks chatbotIds currently being initialized to prevent concurrent/duplicate
+// client creation (e.g. boot auto-init racing with the connect page's /init call).
+const initializing = new Set();
 
 // Session monitoring
 const sessionHealthChecks = new Map();
@@ -255,14 +366,32 @@ function stopHealthMonitoring(chatbotId) {
 }
 
 async function clearSession(chatbotId) {
+  const sessionId = getSessionId(chatbotId);
+
+  // Remove the persisted session from MongoDB so a fresh QR scan is required.
+  try {
+    const store = await getSessionStore();
+    const session = `RemoteAuth-${sessionId}`;
+    if (await store.sessionExists({ session })) {
+      await store.delete({ session });
+      console.log(`Cleared remote (MongoDB) session for ${chatbotId}`);
+    }
+  } catch (error) {
+    console.error(`Error clearing remote session for ${chatbotId}:`, error.message);
+  }
+
+  // Also clean up any local temp session files left by RemoteAuth.
   try {
     const fs = require('fs');
-    const path = require('path');
-    const sessionPath = path.join(__dirname, '.wwebjs_auth', `session-${String(chatbotId).replace(/[^A-Za-z0-9_-]/g, '_')}`);
-    
-    if (fs.existsSync(sessionPath)) {
-      fs.rmSync(sessionPath, { recursive: true, force: true });
-      console.log(`Cleared local session for ${chatbotId}`);
+    const dirs = [
+      path.join(__dirname, '.wwebjs_auth', `RemoteAuth-${sessionId}`),
+      path.join(__dirname, '.wwebjs_auth', `session-${sessionId}`),
+    ];
+    for (const dir of dirs) {
+      if (fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        console.log(`Cleared local session dir ${dir}`);
+      }
     }
   } catch (error) {
     console.error(`Error clearing local session for ${chatbotId}:`, error.message);
@@ -278,26 +407,30 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
 
   if (clients.has(chatbotId)) {
     const client = clients.get(chatbotId);
-    try {
-      const isConnected = client?.info?.wid?.user ? true : false;
-      if (isConnected) {
-        console.log(`Client already connected for ${chatbotId}: ${client.info.wid.user}`);
-        return { status: 'connected', phoneNumber: client.info.wid.user };
-      } else if (qrCodes.has(chatbotId)) {
-        console.log(`Client awaiting QR scan for ${chatbotId}`);
-        return { status: 'awaiting_qr', qr: qrCodes.get(chatbotId)?.base64 };
-      }
-    } catch (error) {
-      console.error(`Error checking client status for ${chatbotId}:`, error.message, error.stack);
-      clients.delete(chatbotId);
-      if (client) {
-        try {
-          await client.destroy();
-        } catch (destroyError) {
-          console.error(`Error destroying stale client for ${chatbotId}:`, destroyError.message);
-        }
-      }
+    const isConnected = client?.info?.wid?.user ? true : false;
+    if (isConnected) {
+      console.log(`Client already connected for ${chatbotId}: ${client.info.wid.user}`);
+      return { status: 'connected', phoneNumber: client.info.wid.user };
+    } else if (qrCodes.has(chatbotId)) {
+      console.log(`Client awaiting QR scan for ${chatbotId}`);
+      return { status: 'awaiting_qr', qr: qrCodes.get(chatbotId)?.base64 };
     }
+    // A client exists but is still mid-handshake (no QR yet, not connected).
+    // Do NOT create a second client on the same session - that causes conflicts
+    // that prevent the 'ready' event from ever firing.
+    console.log(`Client already initializing for ${chatbotId}, not creating a duplicate`);
+    return { status: 'initializing' };
+  }
+
+  // Guard against two concurrent initializeClient() calls (boot auto-init racing
+  // with the connect page's /init) both creating clients before either registers
+  // in the clients map. This check/add is synchronous (no await in between).
+  if (retryCount === 0) {
+    if (initializing.has(chatbotId)) {
+      console.log(`Initialization already in progress for ${chatbotId}`);
+      return { status: 'initializing', qr: qrCodes.get(chatbotId)?.base64 };
+    }
+    initializing.add(chatbotId);
   }
 
   const networkOk = await checkNetwork();
@@ -305,17 +438,28 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     throw new Error('Network check failed: Cannot reach web.whatsapp.com');
   }
 
-  // Simple client configuration with LocalAuth
+  // Persistent client configuration with RemoteAuth backed by MongoDB so the
+  // WhatsApp session is saved remotely and survives server restarts/redeploys.
+  const store = await getSessionStore();
+  const sessionId = getSessionId(chatbotId);
   const client = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new RemoteAuth({
+      store,
+      clientId: sessionId,
+      backupSyncIntervalMs: 300000,
+    }),
     puppeteer: { 
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
   });
   
-  const sessionStorageType = 'local';
-  console.log(`💾 ${process.env.BRAND_NAME || 'Server'}: Using simple LocalAuth configuration`);
+  const sessionStorageType = 'mongodb (RemoteAuth)';
+  console.log(`💾 ${process.env.BRAND_NAME || 'Server'}: Using RemoteAuth (MongoDB) session storage for ${sessionId}`);
+
+  // Register immediately so any concurrent initializeClient()/init call during the
+  // (potentially long) QR-scan window sees this client and does not create a duplicate.
+  clients.set(chatbotId, client);
 
   client.on('loading_screen', (percent, message) => {
     console.log(`Loading screen for ${chatbotId}: ${percent}% - ${message}`);
@@ -354,8 +498,17 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     const phoneNumber = client.info?.wid?.user || 'unknown';
     
     startHealthMonitoring(chatbotId, client);
-    
+
+    // Update the UI immediately so it never gets stuck on "Waiting for
+    // authorization...", regardless of whether the external webhook succeeds.
+    io.emit(`connected:${chatbotId}`, { phoneNumber });
+    qrCodes.delete(chatbotId);
+
+    // Notify the external app (Next.js webhook) independently. A failure or
+    // timeout here must not affect the connection or the UI.
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
       await fetch(`${process.env.AGENT_URL}`, {
         method: 'POST',
         headers: { 
@@ -367,16 +520,20 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
           event: 'connected',
           phoneNumber,
         }),
+        signal: controller.signal,
       });
-      io.emit(`connected:${chatbotId}`, { phoneNumber });
-      qrCodes.delete(chatbotId);
+      clearTimeout(timeout);
     } catch (error) {
-      console.error(`Error notifying Next.js for ${chatbotId}:`, error.message, error.stack);
+      console.error(`Error notifying Next.js for ${chatbotId}:`, error.message);
     }
   });
 
   client.on('authenticated', () => {
     console.log(`🔐 ${process.env.BRAND_NAME || 'Server'}: Session authenticated for ${chatbotId}`);
+  });
+
+  client.on('remote_session_saved', () => {
+    console.log(`💾 ${process.env.BRAND_NAME || 'Server'}: Remote session saved to MongoDB for ${chatbotId} (will survive restarts)`);
   });
 
   client.on('message_create', async (message) => {
@@ -633,6 +790,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     initPromise.catch(() => {});
     await Promise.race([initPromise, initializeTimeout]);
     clients.set(chatbotId, client);
+    initializing.delete(chatbotId);
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Client initialized successfully for ${chatbotId}`);
     console.log(`📊 ${process.env.BRAND_NAME || 'Server'}: Memory usage after init: ${process.memoryUsage().heapUsed / 1024 / 1024} MB`);
     return { status: 'initialized' };
@@ -667,9 +825,12 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     if (retryCount < maxRetries - 1) {
       const nextRetry = retryCount + 1;
       console.log(`🔄 ${process.env.BRAND_NAME || 'Server'}: Retrying initialization for ${chatbotId} (${nextRetry + 1}/${maxRetries}) in ${delayMs}ms`);
+      // Keep the initialization lock held across retries so external /init calls
+      // do not create a competing client while we retry.
       return initializeClient(nextRetry, maxRetries);
     }
     
+    initializing.delete(chatbotId);
     console.error(`💥 ${process.env.BRAND_NAME || 'Server'}: All initialization attempts failed for ${chatbotId}`);
     throw error;
   }
@@ -692,7 +853,18 @@ app.get('/connect/:phoneE164', (req, res) => {
   if (phoneE164 !== process.env.CLIENT_PHONE_E164) {
     return res.status(403).send('Invalid chatbot ID');
   }
-  res.sendFile(path.join(__dirname, 'public', 'connect.html'));
+  try {
+    const fs = require('fs');
+    let html = fs.readFileSync(path.join(__dirname, 'public', 'connect.html'), 'utf8');
+    // Inject the API key so the page can call protected endpoints like /init.
+    const inject = `<script>window.__API_KEY__ = ${JSON.stringify(process.env.API_KEY || '')};</script>`;
+    html = html.replace('</head>', `${inject}\n</head>`);
+    res.setHeader('Content-Type', 'text/html');
+    return res.send(html);
+  } catch (error) {
+    console.error('Error serving connect page:', error.message);
+    return res.sendFile(path.join(__dirname, 'public', 'connect.html'));
+  }
 });
 
 // Initialize client on server start

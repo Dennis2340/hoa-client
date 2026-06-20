@@ -95,7 +95,7 @@
     // Initialize client
     fetch('/init', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': window.__API_KEY__ || '' },
       body: JSON.stringify({ chatbotId })
     })
       .then(res => res.json())
