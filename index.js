@@ -1,6 +1,6 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const { Client, LocalAuth, RemoteAuth, MessageMedia } = require('whatsapp-web.js');
+const { Client, RemoteAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const { Server } = require('socket.io');
 const cors = require('cors');
@@ -133,6 +133,7 @@ async function gracefulShutdown() {
     stopHealthMonitoring(chatbotId);
   }
 
+
   try {
     if (mongoose.connection.readyState === 1) {
       await mongoose.disconnect();
@@ -191,6 +192,8 @@ const clients = new Map();
 // Tracks chatbotIds currently being initialized to prevent concurrent/duplicate
 // client creation (e.g. boot auto-init racing with the connect page's /init call).
 const initializing = new Set();
+const intentionalLogouts = new Set();
+let reconnectAttempts = new Map();
 
 // Session monitoring
 const sessionHealthChecks = new Map();
@@ -368,7 +371,6 @@ function stopHealthMonitoring(chatbotId) {
 async function clearSession(chatbotId) {
   const sessionId = getSessionId(chatbotId);
 
-  // Remove the persisted session from MongoDB so a fresh QR scan is required.
   try {
     const store = await getSessionStore();
     const session = `RemoteAuth-${sessionId}`;
@@ -380,7 +382,6 @@ async function clearSession(chatbotId) {
     console.error(`Error clearing remote session for ${chatbotId}:`, error.message);
   }
 
-  // Also clean up any local temp session files left by RemoteAuth.
   try {
     const fs = require('fs');
     const dirs = [
@@ -394,7 +395,7 @@ async function clearSession(chatbotId) {
       }
     }
   } catch (error) {
-    console.error(`Error clearing local session for ${chatbotId}:`, error.message);
+    console.error(`Error clearing remote session for ${chatbotId}:`, error.message);
   }
 }
 
@@ -496,6 +497,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
   client.on('ready', async () => {
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Client ready for ${chatbotId}`);
     const phoneNumber = client.info?.wid?.user || 'unknown';
+    reconnectAttempts.delete(chatbotId);
     
     startHealthMonitoring(chatbotId, client);
 
@@ -751,7 +753,18 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
       console.error(`Error notifying webhook for ${chatbotId}:`, error.message);
     }
     
-    console.log(`🛑 ${process.env.BRAND_NAME || 'Server'}: Client cleanup complete. No automatic reconnection. Use /init endpoint to reconnect.`);
+    // Auto-reconnect unless user intentionally logged out
+    if (!intentionalLogouts.has(chatbotId)) {
+      const attempts = (reconnectAttempts.get(chatbotId) || 0) + 1;
+      reconnectAttempts.set(chatbotId, attempts);
+      const delay = Math.min(attempts * 5000, 60000);
+      console.log(`🔄 ${process.env.BRAND_NAME || 'Server'}: Auto-reconnecting ${chatbotId} in ${delay/1000}s (attempt ${attempts})...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      initializeClient().catch(err => console.error(`Auto-reconnect failed for ${chatbotId}:`, err.message));
+    } else {
+      console.log(`🛑 ${process.env.BRAND_NAME || 'Server'}: Intentional logout, not reconnecting. Use /init to reconnect.`);
+      intentionalLogouts.delete(chatbotId);
+    }
   });
 
   client.on('auth_failure', async (msg) => {
@@ -867,10 +880,9 @@ app.get('/connect/:phoneE164', (req, res) => {
   }
 });
 
-// Initialize client on server start
+// Initialize client on server start (don't crash on failure — keep server alive for /init retry)
 initializeClient().catch((error) => {
-  console.error('Client initialization failed, shutting down server:', error.message);
-  process.exit(1);
+  console.error('Client initialization failed (server stays running, use /init to retry):', error.message);
 });
 
 app.post('/init', requireApiKey, async (req, res) => {
@@ -1262,6 +1274,7 @@ app.post('/send-media', requireApiKey, async (req, res) => {
 app.post('/logout', requireApiKey, async (req, res) => {
   console.log(`🔓 ${process.env.BRAND_NAME || 'Server'}: Received /logout request`);
   const chatbotId = process.env.CLIENT_PHONE_E164;
+  intentionalLogouts.add(chatbotId); // Prevent auto-reconnect
   const client = clients.get(chatbotId);
   
   if (!client) {
