@@ -50,6 +50,7 @@ class MongoSessionStore {
         .on('error', reject)
         .on('close', resolve);
     });
+    console.log(`💾 ${process.env.BRAND_NAME || 'Server'}: Remote session saved to MongoDB for ${options.session}`);
     // Keep only the most recent backup.
     const docs = await bucket.find({ filename: `${options.session}.zip` }).toArray();
     if (docs.length > 1) {
@@ -72,6 +73,7 @@ class MongoSessionStore {
         .on('error', reject)
         .on('close', resolve);
     });
+    console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: Session restored from MongoDB for ${options.session}`);
   }
 
   async delete(options) {
@@ -97,6 +99,19 @@ async function getSessionStore() {
   if (mongoose.connection.readyState !== 1) {
     console.log(`🗄️ ${process.env.BRAND_NAME || 'Server'}: Connecting to MongoDB for session storage...`);
     dns.setServers(['8.8.8.8', '8.8.4.4']);
+    // Also patch dns.lookup (used by net.createConnection) so all
+    // hostname resolution goes through Google DNS, not the blocked OS DNS.
+    const origLookup = dns.lookup;
+    const googleDns = new dns.Resolver();
+    googleDns.setServers(['8.8.8.8', '8.8.4.4']);
+    dns.lookup = (hostname, options, callback) => {
+      if (typeof options === 'function') { callback = options; options = {}; }
+      googleDns.resolve4(hostname, (err, addresses) => {
+        if (err || !addresses || addresses.length === 0) return origLookup(hostname, options, callback);
+        if (options && options.all) callback(null, addresses.map(a => ({ address: a, family: 4 })));
+        else callback(null, addresses[0], 4);
+      });
+    };
     await mongoose.connect(uri, { serverSelectionTimeoutMS: 30000 });
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: MongoDB connected for session storage`);
   }
@@ -343,24 +358,26 @@ function startHealthMonitoring(chatbotId, client) {
     clearInterval(sessionHealthChecks.get(chatbotId));
   }
   
+  let lastKnownState = null;
   const healthCheck = setInterval(async () => {
     try {
       const state = await client.getState().catch(() => null);
       const isHealthy = state && !['UNPAIRED', 'UNPAIRED_IDLE', 'CONFLICT', 'UNLAUNCHED'].includes(state);
       
-      if (!isHealthy) {
-        console.warn(`Health check failed for ${chatbotId}. State: ${state}`);
-        // Don't immediately reconnect, just log the issue
-        // The disconnected event will handle reconnection
-      } else {
-        console.log(`Health check passed for ${chatbotId}. State: ${state}`);
-        
-        // Send periodic keep-alive to maintain session
-        try {
-          await client.sendPresenceAvailable();
-        } catch (presenceError) {
-          console.warn(`Failed to send presence for ${chatbotId}:`, presenceError.message);
+      if (state !== lastKnownState) {
+        lastKnownState = state;
+        if (!isHealthy) {
+          console.warn(`Health check failed for ${chatbotId}. State: ${state}`);
+        } else {
+          console.log(`Health check passed for ${chatbotId}. State: ${state}`);
         }
+      }
+      
+      // Send periodic keep-alive to maintain session
+      try {
+        await client.sendPresenceAvailable();
+      } catch (presenceError) {
+        console.warn(`Failed to send presence for ${chatbotId}:`, presenceError.message);
       }
     } catch (error) {
       console.error(`Health check error for ${chatbotId}:`, error.message);
