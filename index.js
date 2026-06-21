@@ -429,9 +429,18 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     }
     // A client exists but is still mid-handshake (no QR yet, not connected).
     // Do NOT create a second client on the same session - that causes conflicts
-    // that prevent the 'ready' event from ever firing.
-    console.log(`Client already initializing for ${chatbotId}, not creating a duplicate`);
-    return { status: 'initializing' };
+    // that prevent the 'ready' event from ever firing — UNLESS it's a fresh /init call.
+    if (retryCount === 0) {
+      // Fresh call from /init — clean up the stale client and restart
+      clients.delete(chatbotId);
+      qrCodes.delete(chatbotId);
+      initializing.delete(chatbotId);
+      try { await client.destroy(); } catch (_) {}
+      console.log(`Cleaned up stale client for ${chatbotId}, starting fresh`);
+    } else {
+      console.log(`Client already initializing for ${chatbotId}, not creating a duplicate`);
+      return { status: 'initializing' };
+    }
   }
 
   // Guard against two concurrent initializeClient() calls (boot auto-init racing
@@ -898,6 +907,9 @@ initializeClient().catch((error) => {
 
 app.post('/init', requireApiKey, async (req, res) => {
   console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: Received /init request:`, req.body);
+  // Clear any stuck initialization state so the user always gets a fresh start
+  const chatbotId = process.env.CLIENT_PHONE_E164;
+  initializing.delete(chatbotId);
   try {
     const result = await initializeClient();
     console.log(`📱 ${process.env.BRAND_NAME || 'Server'}: /init response:`, result);
