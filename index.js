@@ -7,6 +7,13 @@ const cors = require('cors');
 const http = require('http');
 const path = require('path');
 require('dotenv').config();
+// If Render's generateValue for API_KEY didn't set it, generate one in-memory
+// so the connect page can call /init without requiring manual config.
+if (!process.env.API_KEY) {
+  const crypto = require('crypto');
+  process.env.API_KEY = crypto.randomBytes(32).toString('hex');
+  console.log(`🔑 ${process.env.BRAND_NAME || 'Server'}: Auto-generated API key: ${process.env.API_KEY.substring(0, 12)}...`);
+}
 const axios = require('axios');
 const fs = require('fs');
 const mongoose = require('mongoose');
