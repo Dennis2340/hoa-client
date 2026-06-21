@@ -1211,16 +1211,12 @@ app.post('/send-whatsapp', async (req, res) => {
     if (!isClientReady) {
       return res.status(503).json({ error: 'Client not ready' });
     }
-    const result = await sendMessageDirectly(client, phoneE164, message);
-    if (result.success) {
-      console.log(`${process.env.BRAND_NAME || 'Server'}: Message sent immediately to ${phoneE164}: ${message}`);
-      return res.status(200).json({ status: 'sent', to: phoneE164 });
-    }
-    console.warn(`${process.env.BRAND_NAME || 'Server'}: Failed to send message to ${phoneE164}: ${result.error}`);
-    return res.status(500).json({ error: 'Failed to send', details: result.error });
+    const result = await safeSendMessage(client, phoneE164, message);
+    console.log(`${process.env.BRAND_NAME || 'Server'}: Message sent to ${phoneE164}`);
+    return res.status(200).json({ status: 'sent', to: phoneE164 });
   } catch (error) {
-    console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error processing WhatsApp message:`, error.message, error.stack);
-    return res.status(500).json({ error: 'Failed to process WhatsApp message', details: error.message });
+    console.error(`❌ ${process.env.BRAND_NAME || 'Server'}: Error sending to ${phoneE164}:`, error.message);
+    return res.status(500).json({ error: 'Failed to send', details: error.message });
   }
 });
 
