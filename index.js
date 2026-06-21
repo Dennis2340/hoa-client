@@ -98,20 +98,24 @@ async function getSessionStore() {
 
   if (mongoose.connection.readyState !== 1) {
     console.log(`🗄️ ${process.env.BRAND_NAME || 'Server'}: Connecting to MongoDB for session storage...`);
-    dns.setServers(['8.8.8.8', '8.8.4.4']);
-    // Also patch dns.lookup (used by net.createConnection) so all
-    // hostname resolution goes through Google DNS, not the blocked OS DNS.
-    const origLookup = dns.lookup;
-    const googleDns = new dns.Resolver();
-    googleDns.setServers(['8.8.8.8', '8.8.4.4']);
-    dns.lookup = (hostname, options, callback) => {
-      if (typeof options === 'function') { callback = options; options = {}; }
-      googleDns.resolve4(hostname, (err, addresses) => {
-        if (err || !addresses || addresses.length === 0) return origLookup(hostname, options, callback);
-        if (options && options.all) callback(null, addresses.map(a => ({ address: a, family: 4 })));
-        else callback(null, addresses[0], 4);
-      });
-    };
+    // Render's cloud DNS works fine — only apply DNS workarounds on local network
+    // where the ISP blocks SRV lookups and direct hostname resolution.
+    if (!process.env.RENDER) {
+      dns.setServers(['8.8.8.8', '8.8.4.4']);
+      // Also patch dns.lookup (used by net.createConnection) so all
+      // hostname resolution goes through Google DNS, not the blocked OS DNS.
+      const origLookup = dns.lookup;
+      const googleDns = new dns.Resolver();
+      googleDns.setServers(['8.8.8.8', '8.8.4.4']);
+      dns.lookup = (hostname, options, callback) => {
+        if (typeof options === 'function') { callback = options; options = {}; }
+        googleDns.resolve4(hostname, (err, addresses) => {
+          if (err || !addresses || addresses.length === 0) return origLookup(hostname, options, callback);
+          if (options && options.all) callback(null, addresses.map(a => ({ address: a, family: 4 })));
+          else callback(null, addresses[0], 4);
+        });
+      };
+    }
     await mongoose.connect(uri, { serverSelectionTimeoutMS: 30000 });
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: MongoDB connected for session storage`);
   }

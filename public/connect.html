@@ -106,7 +106,14 @@
               <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
             </svg>
           `;
-          statusEl.textContent = `Already connected to ${data.phoneNumber}`;
+          statusEl.textContent = `Connected to ${data.phoneNumber}`;
+        } else if (data.status === 'initialized') {
+          qrContainer.innerHTML = `
+            <svg class="h-12 w-12 text-green-500 mx-auto" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z"/>
+            </svg>
+          `;
+          statusEl.textContent = 'Client initialized — waiting for authentication...';
         } else if (data.status === 'awaiting_qr' && data.qr) {
           qrContainer.innerHTML = `
             <p class="text-gray-600 mb-4">Scan this QR code with WhatsApp</p>
@@ -116,6 +123,8 @@
             <p class="text-xs text-gray-500 mt-2">Point your phone's camera at this QR code</p>
           `;
           statusEl.textContent = 'Waiting for authorization...';
+        } else if (data.status === 'initializing') {
+          statusEl.textContent = 'Initialization in progress...';
         }
       })
       .catch(error => {
