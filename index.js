@@ -135,6 +135,15 @@ async function gracefulShutdown() {
     stopHealthMonitoring(chatbotId);
   }
 
+  for (const [chatbotId, client] of clients) {
+    try {
+      console.log(`Saving session for ${chatbotId} before shutdown...`);
+      await client.destroy();
+      console.log(`Session saved and client destroyed for ${chatbotId}`);
+    } catch (err) {
+      console.error(`Error destroying client ${chatbotId}:`, err.message);
+    }
+  }
 
   try {
     if (mongoose.connection.readyState === 1) {
@@ -449,7 +458,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     authStrategy: new RemoteAuth({
       store,
       clientId: sessionId,
-      backupSyncIntervalMs: 300000,
+      backupSyncIntervalMs: 10000,
     }),
     puppeteer: { 
       headless: true,
