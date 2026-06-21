@@ -458,7 +458,7 @@ async function initializeClient(retryCount = 0, maxRetries = 3) {
     authStrategy: new RemoteAuth({
       store,
       clientId: sessionId,
-      backupSyncIntervalMs: 10000,
+      backupSyncIntervalMs: 60000,
     }),
     puppeteer: { 
       headless: true,
