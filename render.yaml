@@ -23,7 +23,7 @@ services:
       - key: AGENT_URL
         sync: false
       - key: API_KEY
-        generateValue: true
+        sync: false
       - key: MONGODB_URI
         sync: false
       - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD

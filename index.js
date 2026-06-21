@@ -928,9 +928,15 @@ app.get('/connect/:phoneE164', (req, res) => {
   }
 });
 
-// Initialize client on server start (don't crash on failure — keep server alive for /init retry)
+// Initialize client on server start.
+// IMPORTANT: A transient WhatsApp/Puppeteer init failure (e.g. "Execution context
+// was destroyed", network timeout) must NOT terminate the process. Calling
+// process.exit(1) here was causing Render/Docker to auto-restart the container in
+// an endless crash loop. The HTTP server must stay up so /healthz passes and the
+// connect page + /init endpoint can recover the session (which is persisted in
+// MongoDB) without a full process restart.
 initializeClient().catch((error) => {
-  console.error('Client initialization failed (server stays running, use /init to retry):', error.message);
+  console.error(`⚠️ ${process.env.BRAND_NAME || 'Server'}: Initial WhatsApp client init failed (server stays up, reconnect via /init):`, error.message);
 });
 
 app.post('/init', requireApiKey, async (req, res) => {
