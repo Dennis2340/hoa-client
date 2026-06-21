@@ -10,6 +10,7 @@ require('dotenv').config();
 const axios = require('axios');
 const fs = require('fs');
 const mongoose = require('mongoose');
+const dns = require('dns');
 
 // Custom MongoDB (GridFS) session store compatible with whatsapp-web.js >= 1.34
 // RemoteAuth. The published `wwebjs-mongo` reads the session zip from the current
@@ -95,6 +96,7 @@ async function getSessionStore() {
 
   if (mongoose.connection.readyState !== 1) {
     console.log(`🗄️ ${process.env.BRAND_NAME || 'Server'}: Connecting to MongoDB for session storage...`);
+    dns.setServers(['8.8.8.8', '8.8.4.4']);
     await mongoose.connect(uri, { serverSelectionTimeoutMS: 30000 });
     console.log(`✅ ${process.env.BRAND_NAME || 'Server'}: MongoDB connected for session storage`);
   }
